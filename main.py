@@ -1,10 +1,15 @@
 from dotenv import load_dotenv
 import os
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
-print("GOOGLE_API_KEY:", os.getenv("GOOGLE_API_KEY"))
-print("LANGSMITH_API_KEY:", os.getenv("LANGSMITH_API_KEY"))
-print("LANGSMITH_TRACING:", os.getenv("LANGSMITH_TRACING"))
-print("LANGSMITH_PROJECT:", os.getenv("LANGSMITH_PROJECT"))
-print("PROJECT_NAME:", os.getenv("PROJECT_NAME"))
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.5-flash", 
+    #temperature=0.2, 
+    #max_output_tokens=1024
+    )
+
+response = llm.invoke("In one sentence, what is a 10-K filing?")
+
+print(response.content)  
