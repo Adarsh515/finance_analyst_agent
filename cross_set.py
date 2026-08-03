@@ -166,6 +166,37 @@ CROSS_SET = [
      "reference_answer": "NVIDIA employed more: about 42,000 employees versus approximately 31,000 - roughly 11,000 more.",
      "evidence": "NVIDIA Item 1 Human Capital: 42,000 employees in 38 countries. AMD Item 1 Human Capital: approximately 31,000 employees.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
+
+    # ===== E. Phase 4.0: questions the single-round pipeline should fail =====
+    {"id": "x26", "companies": ["NVIDIA", "AMD"],
+     "question": "How much bigger was NVIDIA's gross profit than the other chipmaker's in these filings?",
+     "reference_answer": "$136,311 million bigger: NVIDIA's gross profit was $153,463M (FY2026) versus AMD's $17,152M (FY2025).",
+     "evidence": "NVIDIA income statement: Gross profit $153,463. AMD income statement: Gross profit $17,152. 153,463-17,152 = 136,311.",
+     "difficulty": "hard", "section": "cross-company one-name", "answer_type": "number"},
+
+    {"id": "x27", "companies": ["NVIDIA", "AMD"],
+     "question": "Of the two companies in these filings, whichever had the lower gross margin - what percentage of its revenue did that company spend on research and development?",
+     "reference_answer": "AMD had the lower gross margin (50% versus NVIDIA's 71.1%), and AMD spent about 23.4% of its revenue on R&D ($8,091M of $34,639M).",
+     "evidence": "AMD gross margin 50%, NVIDIA gross margin 71.1%. AMD R&D $8,091 / net revenue $34,639 = 23.4%.",
+     "difficulty": "hard", "section": "cross-company multi-hop", "answer_type": "short-text"},
+
+     {"id": "x28", "companies": ["NVIDIA", "AMD"],
+     "question": "How much smaller were AMD's total assets than the other chipmaker's in these filings?",
+     "reference_answer": "$129,877 million smaller: AMD's total assets were $76,926M (FY2025) versus NVIDIA's $206,803M (FY2026).",
+     "evidence": "AMD balance sheet: Total assets $76,926. NVIDIA balance sheet: Total assets $206,803. 206,803-76,926 = 129,877.",
+     "difficulty": "hard", "section": "cross-company one-name", "answer_type": "number"},
+
+    {"id": "x29", "companies": ["NVIDIA", "AMD"],
+     "question": "Across the two companies in these filings, which one leads on gross margin, which leads on R&D as a share of revenue, and which leads on cash generated from operations?",
+     "reference_answer": "NVIDIA leads on gross margin (71.1% vs 50%) and on operating cash flow ($102,718M vs $7,709M). AMD leads on R&D as a share of revenue (about 23.4% vs about 8.6%).",
+     "evidence": "Gross margins 71.1% / 50%. R&D 18,497/215,938 = 8.6%; 8,091/34,639 = 23.4%. Operating cash flow 102,718 / 7,709.",
+     "difficulty": "hard", "section": "cross-company breadth", "answer_type": "short-text"},
+
+    {"id": "x30", "companies": ["NVIDIA", "AMD"],
+     "question": "For whichever of these two companies reported an income tax benefit rather than an expense, what were its total liabilities at fiscal year end?",
+     "reference_answer": "AMD, which reported an income tax benefit of $(103) million, had total liabilities of $13,927 million (total assets $76,926M less stockholders' equity $62,999M).",
+     "evidence": "AMD income statement: income tax provision $(103) - a benefit. AMD balance sheet has no 'Total liabilities' line; 76,926-62,999 = 13,927.",
+     "difficulty": "hard", "section": "cross-company multi-hop derived", "answer_type": "number"},
 ]
 
 def bucket(example):
