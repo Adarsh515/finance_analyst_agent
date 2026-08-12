@@ -197,12 +197,93 @@ CROSS_SET = [
      "reference_answer": "AMD, which reported an income tax benefit of $(103) million, had total liabilities of $13,927 million (total assets $76,926M less stockholders' equity $62,999M).",
      "evidence": "AMD income statement: income tax provision $(103) - a benefit. AMD balance sheet has no 'Total liabilities' line; 76,926-62,999 = 13,927.",
      "difficulty": "hard", "section": "cross-company multi-hop derived", "answer_type": "number"},
+
+
+    # ===== E. Derived figures: arithmetic is the thing under test =====
+    # Every reference below was computed from figures already verified in
+    # PROJECT_TRACKER.md and re-checked against the filings before being added.
+
+    {"id": "d01", "companies": ["NVIDIA", "AMD"], "derived": True,
+     "question": "Which company spent a larger share of its revenue on research and development, "
+                 "and by how many percentage points?",
+     "reference_answer": "AMD, by about 14.8 percentage points. AMD spent 8,091/34,639 = 23.4% of "
+                         "net revenue on R&D; NVIDIA spent 18,497/215,938 = 8.6%.",
+     "evidence": "NVIDIA income statement R&D $18,497, revenue $215,938. AMD income statement R&D $8,091, net revenue $34,639.",
+     "difficulty": "hard", "section": "derived ratio, both companies", "answer_type": "short-text"},
+
+    # Reworded 2026-08-12. The first version asked about "four reportable segments", which is
+    # wrong: AMD combined Client and Gaming into ONE reportable segment in Q1 FY2025, leaving
+    # three. The system caught the false premise on its own. The question was fixed; the
+    # reference answer's key fact (34,639) was not lowered.
+    {"id": "d02", "companies": ["AMD"], "derived": True,
+     "question": "Do AMD's reportable segment revenues add up to its total net revenue for fiscal 2025? "
+                 "Name the segments and show the total.",
+     "reference_answer": "Yes. AMD reports three segments: Data Center $16,635M, Client and Gaming "
+                         "$14,550M, and Embedded $3,454M. 16,635 + 14,550 + 3,454 = $34,639 million, "
+                         "which equals reported total net revenue.",
+     "evidence": "AMD 10-K Note 4 Segment Reporting: 'The Company's three reportable segments are: "
+                 "the Data Center segment, the Client and Gaming segment, and the Embedded segment.' "
+                 "Segment net revenue table: Data Center 16,635; Client and Gaming 14,550 (Client 10,640 "
+                 "and Gaming 3,910 shown as product lines within it); Embedded 3,454; Total 34,639.",
+     "difficulty": "hard", "section": "segment note, three-number sum", "answer_type": "short-text"},
+
+    {"id": "d03", "companies": ["NVIDIA", "AMD"], "derived": True,
+     "question": "What was each company's net profit margin, and what is the gap between them in percentage points?",
+     "reference_answer": "NVIDIA 120,067/215,938 = 55.6%; AMD 4,335/34,639 = 12.5%. Gap about 43.1 percentage points.",
+     "evidence": "NVIDIA net income $120,067 on revenue $215,938. AMD net income $4,335 on net revenue $34,639.",
+     "difficulty": "hard", "section": "derived ratio, both companies", "answer_type": "short-text"},
+
+    {"id": "d04", "companies": ["NVIDIA", "AMD"], "derived": True,
+     "question": "What were total liabilities as a percentage of total assets for each company, and which was lower?",
+     "reference_answer": "AMD was lower, by about 5.8 percentage points. NVIDIA 49,510/206,803 = 23.9%. "
+                         "AMD has no 'Total liabilities' line, so it must be derived: 76,926 - 62,999 = 13,927; "
+                         "13,927/76,926 = 18.1%.",
+     "evidence": "NVIDIA balance sheet: total liabilities 49,510, total assets 206,803. AMD balance sheet: total assets 76,926, stockholders' equity 62,999.",
+     "difficulty": "hard", "section": "derived ratio requiring a derived input", "answer_type": "short-text"},
+
+    {"id": "d05", "companies": ["NVIDIA", "AMD"], "derived": True,
+     "question": "What share of each company's total revenue came from its Data Center segment?",
+     "reference_answer": "NVIDIA 193,737/215,938 = about 89.7%. AMD 16,635/34,639 = about 48.0%.",
+     "evidence": "NVIDIA Data Center 193,737 of revenue 215,938. AMD Data Center 16,635 of net revenue 34,639.",
+     "difficulty": "hard", "section": "segment share, both companies", "answer_type": "short-text"},
+
+    {"id": "d06", "companies": ["NVIDIA"], "derived": True,
+     "question": "What was NVIDIA's operating cash flow as a percentage of its net income in fiscal year 2026?",
+     "reference_answer": "About 85.6% (102,718 / 120,067).",
+     "evidence": "NVIDIA cash flow statement: net cash provided by operating activities 102,718. Income statement: net income 120,067.",
+     "difficulty": "hard", "section": "cross-statement ratio", "answer_type": "number"},
+
+    {"id": "d07", "companies": ["NVIDIA"], "derived": True,
+     "question": "By how much did NVIDIA's net income increase from fiscal 2024 to fiscal 2026, in dollars and as a multiple?",
+     "reference_answer": "It increased by $90,307 million (120,067 - 29,760), about 4.0 times the fiscal 2024 figure.",
+     "evidence": "NVIDIA income statement: net income 120,067 (FY2026), 29,760 (FY2024).",
+     "difficulty": "hard", "section": "two-year growth", "answer_type": "short-text"},
+
+    {"id": "d08", "companies": ["NVIDIA", "AMD"], "derived": True,
+     "question": "What is the combined revenue of both companies for their latest fiscal years, and what share of that combined figure is AMD's?",
+     "reference_answer": "$250,577 million combined (215,938 + 34,639). AMD's share is about 13.8% (34,639 / 250,577).",
+     "evidence": "NVIDIA revenue 215,938 (FY2026). AMD net revenue 34,639 (FY2025).",
+     "difficulty": "hard", "section": "sum then ratio", "answer_type": "short-text"},
+
+    {"id": "d09", "companies": ["AMD"], "derived": True,
+     "question": "What was AMD's operating cash flow from continuing operations in fiscal 2025, and what was it as a percentage of net revenue?",
+     "reference_answer": "$6,493 million (7,709 total less 1,216 from discontinued operations), about 18.7% of net revenue of $34,639 million.",
+     "evidence": "AMD cash flow statement: operating cash flow 7,709 including 1,216 from discontinued operations; continuing 6,493. Net revenue 34,639.",
+     "difficulty": "hard", "section": "subtraction then ratio", "answer_type": "short-text"},
+
+    {"id": "d10", "companies": ["NVIDIA"], "derived": True,
+     "question": "For NVIDIA in fiscal 2026, what was gross profit less research and development expense, as a percentage of revenue?",
+     "reference_answer": "About 62.5%. Gross profit 153,463 less R&D 18,497 = 134,966; 134,966 / 215,938 = 62.5%.",
+     "evidence": "NVIDIA income statement: gross profit 153,463, R&D 18,497, revenue 215,938.",
+     "difficulty": "hard", "section": "subtraction then ratio", "answer_type": "number"},
 ]
 
 def bucket(example):
     """Which scoring group an example belongs to. Read the category, don't infer it."""
     if example["answer_type"] == "refusal":
         return "refusal"
+    if example.get("derived"):          # arithmetic-heavy items, isolated on purpose
+        return "derived"
     return "needs-both" if len(example["companies"]) == 2 else "single-company"
 
 if __name__ == "__main__":
