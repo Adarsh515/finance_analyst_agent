@@ -8,7 +8,7 @@ ids = sys.argv[1:] or ["x26", "x28", "x29", "x30"]
 
 for qid in ids:
     q = BY_ID[qid]["question"]
-    docs, companies = retrieve(q)
+    docs, companies = retrieve(q) 
     print("=" * 78)
     print(f"{qid}   detected={companies}   chunks={len(docs)}")
     print(f"   Q: {q}")

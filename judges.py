@@ -95,6 +95,10 @@ Rules:
 - Score 1 if every factual claim and number in the SYSTEM ANSWER is supported by the CONTEXT.
 - Score 0 if the SYSTEM ANSWER contains any claim or number NOT present in, or directly
   inferable from, the CONTEXT (a hallucination).
+- Arithmetic performed on numbers that ARE in the CONTEXT counts as supported. Differences,
+  sums, ratios, percentages, growth rates and per-share figures derived from context numbers
+  are grounded, even though the computed value itself does not appear in the CONTEXT.
+  Check only that the INPUT numbers are present; do not check whether the arithmetic is right.
 - If the SYSTEM ANSWER refuses / says the information is not stated, score 1 (a refusal makes no
   factual claim, so it is trivially grounded).
 
@@ -156,6 +160,10 @@ if __name__ == "__main__":
         ("What was revenue in FY2026?", "Revenue was $215,938 million.", ctx, 1),
         ("What was net income in FY2026?", "Net income was $88,000 million.", ctx, 0),
         ("What is NVIDIA's market share?", "Not stated in the filing.", ctx, 1),
+        # derived value: inputs are in context, the computed number is not -> grounded
+        ("How much did revenue grow in dollars?", "Revenue grew by $85,441 million.", ctx, 1),
+        # derived from a figure that is NOT in context -> not grounded
+        ("How much did gross profit grow?", "Gross profit grew by $60,000 million.", ctx, 0),
     ]
     for q, pred, c, expected in g_tests:
         v = groundedness_judge(question=q, prediction=pred, context=c)

@@ -1,9 +1,22 @@
 from dotenv import load_dotenv
 from collections import defaultdict
-from rag import answer_question
 from judges import correctness_judge, groundedness_judge
 from golden_set import GOLDEN_SET
 from cross_set import CROSS_SET, bucket
+import sys
+
+# --- A/B switch -------------------------------------------------------------
+# The old path is the default and stays untouched. Pass --agent for the LangGraph path.
+USE_AGENT = "--agent" in sys.argv
+
+if USE_AGENT:
+    import agent
+    agent.VERBOSE = False              # silence node logs during a full eval run
+    answer_fn = agent.run_agent
+    PATH_NAME = "AGENT (LangGraph: plan -> retrieve -> answer)"
+else:
+    from rag import answer_question as answer_fn
+    PATH_NAME = "BASELINE (rag.answer_question)"
 
 load_dotenv()
 
@@ -13,7 +26,7 @@ def run_set(name, examples, bucket_fn=None):
 
     for ex in examples:
         try:
-            out = answer_question(question=ex["question"])
+            out = answer_fn(question=ex["question"])
             ans = out["answer"]
             c = correctness_judge(question=ex["question"], prediction=ans,
                                   reference=ex["reference_answer"])
@@ -62,6 +75,7 @@ def run_set(name, examples, bucket_fn=None):
 
 
 if __name__ == "__main__":
+    print(f"\n### PATH: {PATH_NAME}\n")
     run_set("REGRESSION - NVIDIA only", GOLDEN_SET)
     run_set("CAPABILITY - cross-document", CROSS_SET, bucket_fn=bucket)
 
