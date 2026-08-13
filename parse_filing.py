@@ -63,12 +63,15 @@ def table_title(text, company, period):
     return f"{company} 10-K financial table - {period}:"
 
 if __name__ == "__main__":
-    for path, company, period in [
-        ("data/nvidia_10k.htm", "NVIDIA", "fiscal year 2026 (ended January 25, 2026)"),
-        ("data/amd_10k.htm",    "AMD",    "fiscal year 2025 (ended December 27, 2025)"),
-    ]:
-        pieces = parse_filing(path, company, period)
+    # The filing list lives in corpus.py. It used to be duplicated here, which made
+    # it two sources of truth for one fact - add a filing, update one list, forget
+    # the other, and this smoke test quietly stops covering the new filing.
+    from corpus import DOCS
+
+    for doc in DOCS:
+        pieces = parse_filing(doc["path"], doc["company"], doc["period"])
         n_tab = sum(1 for p in pieces if p["type"] == "table")
-        print(f"{company}: {len(pieces)} pieces  ({n_tab} tables, {len(pieces) - n_tab} narrative)")
+        print(f"{doc['slug']:16} {len(pieces)} pieces  "
+              f"({n_tab} tables, {len(pieces) - n_tab} narrative)")
         print("   first table title:", pieces[0]["text"].split("\n")[0][:100])
         print()
