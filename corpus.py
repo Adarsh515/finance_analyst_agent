@@ -37,13 +37,16 @@ DOCS = [
      "doc_type": "10-K",
      "period": "fiscal year 2025 (ended December 27, 2025)"},
 
-    # Next wave, deliberately held back so the third company and the first quarterly
-    # filing are not introduced in the same measurement:
-    # {"slug": "nvidia-q3fy2026",
-    #  "path": "data/nvidia_10q_q3fy2026.htm",
-    #  "company": "NVIDIA",
-    #  "doc_type": "10-Q",
-    #  "period": "third quarter of fiscal year 2026 (ended October 26, 2025)"},
+    # The first quarterly filing, held back one wave so it did not land in the same
+    # measurement as the third company. It overlaps the FY2026 10-K on purpose: its
+    # income statement carries BOTH a three-month and a nine-month column for a period
+    # already covered annually, so "NVIDIA revenue" now has three defensible values
+    # (57,006 / 147,811 / 215,938) depending on the period asked for.
+    {"slug": "nvidia-q3fy2026",
+     "path": "data/nvidia_10q_q3fy2026.htm",
+     "company": "NVIDIA",
+     "doc_type": "10-Q",
+     "period": "third quarter of fiscal year 2026 (ended October 26, 2025)"},
 ]
 
 # The slug is written out by hand rather than derived from company + period.

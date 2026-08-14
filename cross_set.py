@@ -1,12 +1,34 @@
 """
-Cross-document eval set: NVIDIA FY2026 10-K + AMD FY2025 10-K.
+Cross-document eval set.
 
-Same rules as golden_set.py - every reference_answer is HUMAN-verified against
-the filings. New field: "companies" = which filings an answer legitimately needs.
-That field is what lets us score single-company vs cross-company separately.
+Corpus as of 2026-08-13: NVIDIA FY2026 10-K, NVIDIA FY2025 10-K, AMD FY2025 10-K,
+Intel FY2025 10-K, NVIDIA Q3 FY2026 10-Q. (This docstring said "NVIDIA FY2026 + AMD
+FY2025" for a day after Intel was indexed - the same stale-assumption bug the
+questions themselves had. The authoritative list is corpus.py, and what actually
+landed is in the index; this line is a convenience and will rot again.)
 
-Period trap: AMD fiscal 2025 ended Dec 27, 2025. NVIDIA fiscal 2026 ended Jan 25, 2026.
-Different labels, nearly the same calendar year. Compare periods, not FY numbers.
+Same rules as golden_set.py - every reference_answer is HUMAN-verified against the
+filings. "companies" lists which filings an answer legitimately needs; "bucket", when
+present, names the scoring group explicitly rather than letting it be inferred.
+
+NEVER write a scope word into a question. "the two companies", "both", "which of them"
+are facts about the corpus smuggled into the question, and they turn a correct system
+into a failing one the day a filing is added. Say "among the companies in these
+filings", or name them.
+
+Period traps in this corpus:
+  - AMD fiscal 2025 ended Dec 27, 2025; NVIDIA fiscal 2026 ended Jan 25, 2026.
+    Different labels, nearly the same calendar year. Compare periods, not FY numbers.
+  - AMD and Intel BOTH ended fiscal 2025 on Dec 27, 2025, so a period string is not
+    unique - only the (company, period) pair is.
+  - NVIDIA fiscal 2025 appears twice: as its own filing and as the prior-year column
+    inside the fiscal 2026 filing.
+  - The Q3 FY2026 10-Q overlaps the FY2026 10-K and carries BOTH a three-month and a
+    nine-month column, so "NVIDIA revenue" has three defensible values depending on
+    the period: 57,006 (Q3) / 147,811 (nine months) / 215,938 (full year).
+  - A filing's period label describes the DOCUMENT, not the data inside it. Each 10-K
+    income statement carries three fiscal years, so fiscal 2023 lives in the corpus
+    even though no filing is labelled 2023.
 """
 
 CROSS_SET = [
@@ -333,12 +355,111 @@ CROSS_SET = [
      "reference_answer": "About 62.5%. Gross profit 153,463 less R&D 18,497 = 134,966; 134,966 / 215,938 = 62.5%.",
      "evidence": "NVIDIA income statement: gross profit 153,463, R&D 18,497, revenue 215,938.",
      "difficulty": "hard", "section": "subtraction then ratio", "answer_type": "number"},
+    # ===== F. Phase 4.3 wave 3: the question types that make this a compliance tool =====
+    # Four new categories, each carrying an explicit "bucket" so it is reported separately.
+    # Every reference is computed from figures verified against the filings and recorded in
+    # PROJECT_TRACKER.md. No scope word ("the two", "both") appears anywhere: that is the
+    # mistake wave 2 spent an entire eval run teaching us.
+
+    # --- trend over years: only possible now that NVIDIA has two fiscal years indexed ---
+    {"id": "t01", "companies": ["NVIDIA"], "bucket": "trend",
+     "question": "How did NVIDIA's gross margin change from fiscal 2025 to fiscal 2026?",
+     "reference_answer": "It fell by about 3.9 percentage points, from 75.0% in fiscal 2025 to 71.1% in fiscal 2026.",
+     "evidence": "NVIDIA MD&A percentage tables: gross margin 71.1% (FY2026) and 75.0% (FY2025).",
+     "difficulty": "medium", "section": "trend", "answer_type": "short-text"},
+
+    {"id": "t02", "companies": ["NVIDIA"], "bucket": "trend",
+     "question": "How much did NVIDIA's research and development expense grow from fiscal 2025 to fiscal 2026, in dollars and percent?",
+     "reference_answer": "By $5,583 million, about 43%. R&D was $12,914 million in fiscal 2025 and $18,497 million in fiscal 2026.",
+     "evidence": "NVIDIA income statement R&D 18,497 (FY2026) and 12,914 (FY2025). 18,497-12,914 = 5,583; 5,583/12,914 = 43.2%.",
+     "difficulty": "hard", "section": "trend", "answer_type": "short-text"},
+
+    # This one CANNOT be answered from the FY2026 filing alone: 26,974 appears nowhere in it.
+    # It is the item that proves the second NVIDIA filing is actually being used.
+    {"id": "t03", "companies": ["NVIDIA"], "bucket": "trend",
+     "question": "What was NVIDIA's revenue in fiscal 2023, and how many times larger was fiscal 2026's revenue?",
+     "reference_answer": "$26,974 million in fiscal 2023; fiscal 2026 revenue of $215,938 million was about 8.0 times larger.",
+     "evidence": "NVIDIA FY2025 10-K income statement shows three years: FY2025 130,497, FY2024 60,922, FY2023 26,974. The FY2026 10-K does not contain the FY2023 figure at all. 215,938/26,974 = 8.0.",
+     "difficulty": "hard", "section": "trend, requires the older filing", "answer_type": "short-text"},
+
+    # --- three-way comparison: stresses job count, and MAX_JOBS for the first time ---
+    {"id": "w01", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
+     "question": "Rank all the companies in these filings by total revenue in their most recent fiscal years, with the figures.",
+     "reference_answer": "NVIDIA $215,938M (FY2026), then Intel $52,853M (FY2025), then AMD $34,639M (FY2025).",
+     "evidence": "NVIDIA revenue 215,938. Intel net revenue 52,853. AMD net revenue 34,639.",
+     "difficulty": "hard", "section": "three-way", "answer_type": "short-text"},
+
+    {"id": "w02", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
+     "question": "Which company reported the largest total assets, and how does that ranking compare with the revenue ranking?",
+     "reference_answer": "Intel, with total assets of $211,429 million, slightly ahead of NVIDIA's $206,803 million and well ahead of AMD's $76,926 million. That inverts the revenue ranking, where NVIDIA is far ahead of Intel.",
+     "evidence": "Intel total assets 211,429. NVIDIA total assets 206,803. AMD total assets 76,926. Revenue: NVIDIA 215,938 > Intel 52,853 > AMD 34,639.",
+     "difficulty": "hard", "section": "three-way, counterintuitive", "answer_type": "short-text"},
+
+    {"id": "w03", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
+     "question": "Rank all the companies in these filings by cash generated from operating activities, with the figures.",
+     "reference_answer": "NVIDIA $102,718M, then Intel $9,697M, then AMD $7,709M.",
+     "evidence": "NVIDIA cash flow statement 102,718. Intel cash flow statement 9,697. AMD cash flow statement 7,709.",
+     "difficulty": "hard", "section": "three-way", "answer_type": "short-text"},
+
+    # --- red flags: the question type that makes this a compliance tool, not a lookup ---
+    {"id": "r01", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
+     "question": "Which company generated LESS cash from operations than the net income it reported, and what were the two figures?",
+     "reference_answer": "NVIDIA: operating cash flow of $102,718 million against net income of $120,067 million, a shortfall of $17,349 million. AMD and Intel both generated more operating cash than net income.",
+     "evidence": "NVIDIA OCF 102,718 vs net income 120,067. AMD OCF 7,709 vs net income 4,335. Intel OCF 9,697 vs net income 26 including non-controlling interests.",
+     "difficulty": "hard", "section": "red-flag", "answer_type": "short-text"},
+
+    {"id": "r02", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
+     "question": "Which company reported an operating loss and yet positive income before taxes, and what were the two figures?",
+     "reference_answer": "Intel: an operating loss of $(2,214) million but income before taxes of $1,557 million.",
+     "evidence": "Intel income statement: operating income (loss) (2,214); income (loss) before taxes 1,557.",
+     "difficulty": "hard", "section": "red-flag, sign trap", "answer_type": "short-text"},
+
+    {"id": "r03", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
+     "question": "For which company does reported net income depend on whether non-controlling interests are included, and by how much do the two figures differ?",
+     "reference_answer": "Intel: net income of $26 million including non-controlling interests, versus a net LOSS of $(267) million attributable to Intel - a difference of $293 million.",
+     "evidence": "Intel income statement: net income (loss) 26; net income (loss) attributable to Intel (267). 26-(-267) = 293.",
+     "difficulty": "hard", "section": "red-flag, definition trap", "answer_type": "short-text"},
+
+    # --- duplicate source: the same fact printed in two filings ---
+    {"id": "p01", "companies": ["NVIDIA"], "bucket": "duplicate-source",
+     "question": "NVIDIA's fiscal 2025 revenue appears in more than one filing in this corpus. Do the sources agree, and what is the figure?",
+     "reference_answer": "Yes, they agree: $130,497 million. It appears in NVIDIA's own fiscal 2025 10-K and again as the prior-year comparison column in the fiscal 2026 10-K.",
+     "evidence": "NVIDIA FY2025 10-K income statement revenue 130,497. NVIDIA FY2026 10-K prior-year column revenue 130,497. Identical, no rounding difference.",
+     "difficulty": "hard", "section": "duplicate source", "answer_type": "short-text"},
+
+    {"id": "p02", "companies": ["AMD", "Intel"], "bucket": "duplicate-source",
+     "question": "Two companies in these filings closed their most recent fiscal year on the same date. Which date, and what were their respective revenues?",
+     "reference_answer": "27 December 2025. AMD reported net revenue of $34,639 million and Intel $52,853 million for that fiscal year.",
+     "evidence": "AMD fiscal 2025 ended December 27, 2025, net revenue 34,639. Intel fiscal 2025 ended December 27, 2025, net revenue 52,853.",
+     "difficulty": "hard", "section": "duplicate source, period collision", "answer_type": "short-text"},
+
+    # --- quarterly: the 10-Q overlaps the annual filing and reports two column sets ---
+    {"id": "qq1", "companies": ["NVIDIA"], "bucket": "quarterly",
+     "question": "What was NVIDIA's revenue for the three months ended October 26, 2025?",
+     "reference_answer": "$57,006 million.",
+     "evidence": "NVIDIA Q3 FY2026 10-Q income statement, three months ended Oct 26, 2025: Revenue 57,006 (prior-year quarter 35,082).",
+     "difficulty": "medium", "section": "quarterly", "answer_type": "number"},
+
+    {"id": "qq2", "companies": ["NVIDIA"], "bucket": "quarterly",
+     "question": "What was NVIDIA's revenue for the nine months ended October 26, 2025, and how much of full-year fiscal 2026 revenue did the remaining quarter contribute?",
+     "reference_answer": "$147,811 million for the nine months; the remaining quarter contributed $68,127 million of the $215,938 million full-year figure.",
+     "evidence": "10-Q nine months ended Oct 26, 2025: Revenue 147,811. FY2026 10-K: Revenue 215,938. 215,938-147,811 = 68,127. This answer needs BOTH the 10-Q and the 10-K.",
+     "difficulty": "hard", "section": "quarterly + annual", "answer_type": "short-text"},
+
+    {"id": "qq3", "companies": ["NVIDIA"], "bucket": "quarterly",
+     "question": "NVIDIA's cash generated from operations appears with different values across these filings. What was it for the nine months ended October 26, 2025, and for the full fiscal year 2026?",
+     "reference_answer": "$66,530 million for the nine months ended October 26, 2025, and $102,718 million for full fiscal year 2026.",
+     "evidence": "10-Q cash flow statement, nine months ended Oct 26, 2025: net cash provided by operating activities 66,530. FY2026 10-K: 102,718.",
+     "difficulty": "hard", "section": "quarterly + annual, period disambiguation", "answer_type": "short-text"},
+
 ]
 
 def bucket(example):
     """Which scoring group an example belongs to. Read the category, don't infer it."""
     if example["answer_type"] == "refusal":
         return "refusal"
+    if example.get("bucket"):           # an item may name its own group
+        return example["bucket"]
     if example.get("derived"):          # arithmetic-heavy items, isolated on purpose
         return "derived"
     # Renamed from "needs-both" on 2026-08-13. The old name was itself a corpus

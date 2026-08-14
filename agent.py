@@ -103,6 +103,14 @@ Rules:
   above, and only ever paired with that same line's company. Use "" when the question
   spans several periods or does not depend on one.
 - "latest", "most recent" or "current" means the newest period listed for that company.
+- A 10-K's income statement and cash flow statement carry up to THREE fiscal years, so a
+  filing labelled with one period also holds the two years before it. If the QUESTION asks
+  about a fiscal year that is NOT in the list above, set period to "". The figure is
+  probably still in the corpus, sitting in an older filing's comparative columns. Never
+  pin a period the question did not ask for.
+- When period is "" and the question names a specific year, put that year in the query
+  text. A period is normally a filter and never a query term, but a year that owns no
+  filing of its own can only be reached through the text.
 - Each job targets exactly ONE figure from ONE financial statement. Never combine
   figures from different statements in a single query: "revenue and operating cash flow"
   must become two jobs. Line items from the SAME statement may appear together, because
