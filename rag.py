@@ -49,10 +49,32 @@ QUESTION: {question}
 ANSWER:"""
 
 # --- 3.3 entity detection: which companies is this question about? ---
-COMPANY_ALIASES = {
-    "NVIDIA": ["nvidia", "nvda"],
-    "AMD":    ["amd", "advanced micro devices"],
+# The company list is READ FROM THE INDEX, not typed here. It used to be hardcoded,
+# which made it a second source of truth for a fact the index already owns: index a
+# third company, forget to edit this dict, and the system becomes blind to it with no
+# error anywhere. Phase 4.3 contract amendment: rag.py may change ONLY where a
+# hardcoded corpus fact becomes index-derived. No logic changes.
+
+def _known_companies():
+    """Company names actually present in the index."""
+    metas = vectorstore.get(include=["metadatas"])["metadatas"]
+    return sorted({m["company"] for m in metas})
+
+
+# Aliases the index cannot know: tickers and legal names. Keyed by company, so an entry
+# for a company that is not indexed is simply never used - an unused key is harmless,
+# a missing one is a silent failure.
+EXTRA_ALIASES = {
+    "NVIDIA": ["nvda"],
+    "AMD":    ["advanced micro devices"],
+    "Intel":  ["intc", "intel corporation"],
 }
+
+COMPANY_ALIASES = {c: [c.lower()] + EXTRA_ALIASES.get(c, [])
+                   for c in _known_companies()}
+
+if not COMPANY_ALIASES:
+    print("WARNING: the index reports no companies. Run build_index.py before querying.")
 
 def detect_companies(question):
     """Cheap, deterministic, free. Returns e.g. ['NVIDIA', 'AMD'] or []."""
@@ -85,8 +107,7 @@ def answer_question(question: str, k: int = 4) -> dict:
 # --- 3.5 LLM fallback: fires ONLY when the free scan finds nothing ---
 ROUTER_PROMPT = """You route questions to company filings. The library contains \
 exactly these companies, and no others:
-NVIDIA
-AMD
+{companies}
 
 Which of them does the QUESTION need in order to be answered? A question may need \
 one of them, both of them, or neither.
@@ -102,7 +123,8 @@ COMPANIES:"""
 def llm_detect_companies(question):
     """Paid fallback for a blank card. The LLM only SUGGESTS names; detect_companies()
     then VALIDATES them, so a hallucinated company can never reach the Chroma filter."""
-    resp = llm.invoke(ROUTER_PROMPT.format(question=question))
+    resp = llm.invoke(ROUTER_PROMPT.format(
+        companies="\n".join(COMPANY_ALIASES), question=question))
     log_cost("gemini-3.1-flash-lite", resp, label="router")
     return detect_companies(to_text(resp.content))
 

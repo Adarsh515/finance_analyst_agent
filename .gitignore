@@ -6,3 +6,4 @@ __pycache__/
 .idea/
 chroma_db/
 eval_*.txt
+eval_*.jsonl

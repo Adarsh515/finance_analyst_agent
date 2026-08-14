@@ -56,7 +56,7 @@ if existing and "--force" not in sys.argv:
 # Parsing is free; embedding is not and is not easily undone.
 batches, all_ids = [], []
 for doc in DOCS:
-    pieces = parse_filing(doc["path"], doc["company"], doc["period"])
+    pieces = parse_filing(doc["path"], doc["company"], doc["period"], doc["doc_type"])
     ids = [f"{doc['slug']}-piece-{i}" for i in range(len(pieces))]
     batches.append((doc, pieces, ids))
     all_ids += ids
@@ -74,8 +74,12 @@ print(f"\n{len(all_ids)} chunk ids, all unique. Embedding now.\n")
 # --- embed -------------------------------------------------------------------
 for doc, pieces, ids in batches:
     texts = [p["text"] for p in pieces]
+    # doc_type is stored even though nothing filters on it yet. Metadata is nearly free
+    # to add at ingest and costs a full re-embed to add later, so information is never
+    # thrown away here. This is not the same thing as building an unused feature.
     metadatas = [{"company": p["company"], "period": p["period"],
-                  "type": p["type"], "source_table": p.get("source_table", -1)}
+                  "doc_type": p["doc_type"], "type": p["type"],
+                  "source_table": p.get("source_table", -1)}
                  for p in pieces]
     print(f"{doc['slug']}:")
     for i in range(0, len(texts), BATCH):
@@ -94,10 +98,13 @@ for (company, period), n in sorted(Counter(
         (m["company"], m["period"]) for m in got["metadatas"]).items()):
     print(f"  {company:7} {period:44} {n:4}")
 
-# --- the moment of truth: can retrieval tell two periods of ONE company apart? -
+# --- the moment of truth: can retrieval tell filings apart? -------------------
+# Two periods of one company, and two companies whose fiscal years ended on the SAME
+# day (AMD and Intel both closed FY2025 on 27 December 2025).
 for q in ["What was NVIDIA's total revenue for fiscal year 2026?",
           "What was NVIDIA's total revenue for fiscal year 2025?",
-          "What was AMD's net revenue for fiscal year 2025?"]:
+          "What was AMD's net revenue for fiscal year 2025?",
+          "What was Intel's net revenue for fiscal year 2025?"]:
     print(f"\nQ: {q}")
     for d in store.similarity_search(q, k=3):
         print(f"   [{d.metadata['company']:<6} {d.metadata['period'][:26]:28}] "

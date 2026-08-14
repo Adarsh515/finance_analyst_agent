@@ -119,29 +119,47 @@ CROSS_SET = [
      # ===== E. Implicit reference: needs BOTH filings, names NEITHER company =====
     # These are built to defeat detect_companies(). None of them contains the
     # strings "nvidia", "nvda", "amd", or "advanced micro devices".
-    {"id": "x18", "companies": ["NVIDIA", "AMD"],
-     "question": "Between the two companies covered by these filings, which reported higher total revenue in its most recent fiscal year, and by how much?",
-     "reference_answer": "NVIDIA, by $181,299 million. NVIDIA's revenue was $215,938M (FY2026) versus $34,639M (FY2025) - roughly 6.2 times larger.",
-     "evidence": "NVIDIA income statement: Revenue $215,938. AMD income statement: Net revenue $34,639. 215,938-34,639 = 181,299.",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "x18", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "Among the companies covered by these filings, which reported the highest total revenue in its most recent fiscal year, and by how much more than the next largest?",
+     "reference_answer": "NVIDIA, by $163,085 million more than Intel. NVIDIA's revenue was $215,938M (FY2026), Intel's $52,853M (FY2025), AMD's $34,639M (FY2025).",
+     "evidence": "NVIDIA income statement Revenue 215,938. Intel income statement Net revenue 52,853. AMD income statement Net revenue 34,639. 215,938-52,853 = 163,085.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
-    {"id": "x19", "companies": ["NVIDIA", "AMD"],
-     "question": "Which of them spent more on research and development, and what were the two figures?",
-     "reference_answer": "NVIDIA spent more: $18,497 million versus $8,091 million - $10,406 million more, about 2.3 times as much.",
-     "evidence": "NVIDIA R&D $18,497 (FY2026); AMD R&D $8,091 (FY2025).",
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "x19", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "Among the companies in these filings, which spent the most on research and development in its most recent fiscal year, and what were the figures?",
+     "reference_answer": "NVIDIA spent the most: $18,497 million, versus Intel's $13,774 million and AMD's $8,091 million.",
+     "evidence": "NVIDIA income statement R&D 18,497 (FY2026). Intel income statement R&D 13,774 (FY2025). AMD income statement R&D 8,091 (FY2025).",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
-    {"id": "x20", "companies": ["NVIDIA", "AMD"],
-     "question": "For the larger of the two by revenue, what was its gross margin, and how does that compare with the smaller one's?",
-     "reference_answer": "The larger by revenue is NVIDIA, with a gross margin of about 71.1%, versus AMD's 50% - roughly 21 percentage points higher.",
-     "evidence": "NVIDIA MD&A percentage table: gross margin 71.1% (FY2026). AMD income statement: Gross margin 50% (FY2025). Revenue 215,938 > 34,639.",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "x20", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "For the company with the highest revenue in these filings, what was its gross margin, and how does that compare with the lowest-revenue company's?",
+     "reference_answer": "The highest by revenue is NVIDIA, with a gross margin of about 71.1%, versus AMD's 50% - roughly 21 percentage points higher. AMD has the lowest revenue of the three.",
+     "evidence": "Revenue: NVIDIA 215,938 > Intel 52,853 > AMD 34,639. NVIDIA MD&A gross margin 71.1% (FY2026). AMD gross margin 50% (FY2025).",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
-    {"id": "x21", "companies": ["NVIDIA", "AMD"],
-     "question": "The company with the higher gross margin also reports a Data Center segment. How much bigger was its Data Center revenue than the other company's?",
-     "reference_answer": "$177,102 million bigger. NVIDIA (the higher-margin company at 71.1%) reported Data Center revenue of $193,737M versus AMD's $16,635M - about 11.6 times larger.",
-     "evidence": "NVIDIA Data Center $193,737 (FY2026); AMD Data Center $16,635 (FY2025). 193,737-16,635 = 177,102.",
-     "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "x21", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "The company with the highest gross margin in these filings also reports a Data Center segment. How much bigger was its Data Center revenue than AMD's?",
+     "reference_answer": "$177,102 million bigger. NVIDIA (the highest-margin company at 71.1%) reported Data Center revenue of $193,737M versus AMD's $16,635M - about 11.6 times larger.",
+     "evidence": "Gross margin: NVIDIA 71.1% > AMD 50% > Intel 34.8%. NVIDIA Data Center 193,737. AMD Data Center 16,635. 193,737-16,635 = 177,102.",
+     "difficulty": "hard", "section": "cross-company multi-hop", "answer_type": "short-text"},
 
     {"id": "x22", "companies": ["NVIDIA", "AMD"],
      "question": "And how did their Gaming segments compare in those same periods?",
@@ -149,22 +167,36 @@ CROSS_SET = [
      "evidence": "NVIDIA revenue by market platform: Gaming $16,042. AMD segment results: Gaming $3,910.",
      "difficulty": "hard", "section": "cross-company implicit trap", "answer_type": "short-text"},
 
-    {"id": "x23", "companies": ["NVIDIA", "AMD"],
-     "question": "What was the combined net income of both chipmakers in their most recent fiscal years covered by these filings?",
-     "reference_answer": "$124,402 million (about $124.4 billion): NVIDIA's $120,067M for FY2026 plus AMD's $4,335M for FY2025. The two fiscal years are not identical periods.",
-     "evidence": "NVIDIA net income $120,067 (FY ended Jan 25, 2026); AMD net income $4,335 (FY ended Dec 27, 2025). 120,067+4,335 = 124,402.",
-     "difficulty": "hard", "section": "cross-company implicit", "answer_type": "number"},
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "x23", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "What was the combined net income attributable to shareholders of all the companies in these filings, in their most recent fiscal years?",
+     "reference_answer": "$124,135 million: NVIDIA's $120,067M (FY2026) plus AMD's $4,335M (FY2025) plus Intel's net LOSS attributable to Intel of $(267)M (FY2025). The fiscal years are not identical periods.",
+     "evidence": "NVIDIA net income 120,067. AMD net income 4,335. Intel net income (loss) attributable to Intel (267); Intel's total net income including non-controlling interests was 26, which is why the question specifies attributable to shareholders. 120,067+4,335-267 = 124,135.",
+     "difficulty": "hard", "section": "cross-company sum, sign trap", "answer_type": "number"},
 
-    {"id": "x24", "companies": ["NVIDIA", "AMD"],
-     "question": "How many times more cash did the bigger company generate from operations than the smaller one?",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "x24", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "How many times more cash did the highest-revenue company generate from operations than the lowest-revenue one?",
      "reference_answer": "About 13.3 times. NVIDIA generated $102,718 million from operating activities versus AMD's $7,709 million.",
-     "evidence": "NVIDIA cash flow: operating activities $102,718. AMD cash flow: operating activities $7,709. 102,718/7,709 = 13.3.",
+     "evidence": "Revenue ranking: NVIDIA 215,938 > Intel 52,853 > AMD 34,639. NVIDIA cash flow operating activities 102,718. AMD cash flow operating activities 7,709. 102,718/7,709 = 13.3.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
-    {"id": "x25", "companies": ["NVIDIA", "AMD"],
-     "question": "Which of the two employed more people at fiscal year end, and roughly how many did each report?",
-     "reference_answer": "NVIDIA employed more: about 42,000 employees versus approximately 31,000 - roughly 11,000 more.",
-     "evidence": "NVIDIA Item 1 Human Capital: 42,000 employees in 38 countries. AMD Item 1 Human Capital: approximately 31,000 employees.",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "x25", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "Which company employed the most people at fiscal year end, and roughly how many did each report?",
+     "reference_answer": "Intel, with 85,100 people as of December 27, 2025, ahead of NVIDIA's roughly 42,000 and AMD's approximately 31,000.",
+     "evidence": "Intel Human Capital: workforce of 85,100 people as of December 27, 2025. NVIDIA Item 1: 42,000 employees in 38 countries. AMD Item 1: approximately 31,000 employees.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
     # ===== E. Phase 4.0: questions the single-round pipeline should fail =====
@@ -174,10 +206,15 @@ CROSS_SET = [
      "evidence": "NVIDIA income statement: Gross profit $153,463. AMD income statement: Gross profit $17,152. 153,463-17,152 = 136,311.",
      "difficulty": "hard", "section": "cross-company one-name", "answer_type": "number"},
 
-    {"id": "x27", "companies": ["NVIDIA", "AMD"],
-     "question": "Of the two companies in these filings, whichever had the lower gross margin - what percentage of its revenue did that company spend on research and development?",
-     "reference_answer": "AMD had the lower gross margin (50% versus NVIDIA's 71.1%), and AMD spent about 23.4% of its revenue on R&D ($8,091M of $34,639M).",
-     "evidence": "AMD gross margin 50%, NVIDIA gross margin 71.1%. AMD R&D $8,091 / net revenue $34,639 = 23.4%.",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "x27", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "Among the companies in these filings, whichever had the lowest gross margin - what percentage of its revenue did that company spend on research and development?",
+     "reference_answer": "Intel had the lowest gross margin (about 34.8%, versus AMD's 50% and NVIDIA's 71.1%), and Intel spent about 26.1% of its revenue on R&D ($13,774M of $52,853M).",
+     "evidence": "Intel gross profit 18,375 / net revenue 52,853 = 34.8%. AMD 50%, NVIDIA 71.1%. Intel R&D 13,774 / 52,853 = 26.1%.",
      "difficulty": "hard", "section": "cross-company multi-hop", "answer_type": "short-text"},
 
      {"id": "x28", "companies": ["NVIDIA", "AMD"],
@@ -186,30 +223,41 @@ CROSS_SET = [
      "evidence": "AMD balance sheet: Total assets $76,926. NVIDIA balance sheet: Total assets $206,803. 206,803-76,926 = 129,877.",
      "difficulty": "hard", "section": "cross-company one-name", "answer_type": "number"},
 
-    {"id": "x29", "companies": ["NVIDIA", "AMD"],
-     "question": "Across the two companies in these filings, which one leads on gross margin, which leads on R&D as a share of revenue, and which leads on cash generated from operations?",
-     "reference_answer": "NVIDIA leads on gross margin (71.1% vs 50%) and on operating cash flow ($102,718M vs $7,709M). AMD leads on R&D as a share of revenue (about 23.4% vs about 8.6%).",
-     "evidence": "Gross margins 71.1% / 50%. R&D 18,497/215,938 = 8.6%; 8,091/34,639 = 23.4%. Operating cash flow 102,718 / 7,709.",
-     "difficulty": "hard", "section": "cross-company breadth", "answer_type": "short-text"},
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "x29", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "Among the companies in these filings, which one leads on gross margin, which leads on R&D as a share of revenue, and which leads on cash generated from operations?",
+     "reference_answer": "NVIDIA leads on gross margin (71.1%, versus AMD 50% and Intel about 34.8%) and on operating cash flow ($102,718M, versus Intel $9,697M and AMD $7,709M). Intel leads on R&D as a share of revenue (about 26.1%, versus AMD 23.4% and NVIDIA 8.6%).",
+     "evidence": "Gross margin NVIDIA 71.1%, AMD 50%, Intel 18,375/52,853 = 34.8%. Operating cash flow NVIDIA 102,718, Intel 9,697, AMD 7,709. R&D share Intel 13,774/52,853 = 26.1%, AMD 8,091/34,639 = 23.4%, NVIDIA 18,497/215,938 = 8.6%.",
+     "difficulty": "hard", "section": "cross-company three-way", "answer_type": "short-text"},
 
-    {"id": "x30", "companies": ["NVIDIA", "AMD"],
-     "question": "For whichever of these two companies reported an income tax benefit rather than an expense, what were its total liabilities at fiscal year end?",
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "x30", "companies": ["NVIDIA", "AMD", "Intel"],
+     "question": "For whichever company in these filings reported an income tax benefit rather than an expense, what were its total liabilities at fiscal year end?",
      "reference_answer": "AMD, which reported an income tax benefit of $(103) million, had total liabilities of $13,927 million (total assets $76,926M less stockholders' equity $62,999M).",
-     "evidence": "AMD income statement: income tax provision $(103) - a benefit. AMD balance sheet has no 'Total liabilities' line; 76,926-62,999 = 13,927.",
-     "difficulty": "hard", "section": "cross-company multi-hop derived", "answer_type": "number"},
+     "evidence": "AMD income tax provision (103), a benefit. NVIDIA income tax expense 21,383. Intel provision for (benefit from) taxes 1,531, an expense - so AMD remains the only company with a benefit. AMD balance sheet has no Total liabilities line: 76,926 - 62,999 = 13,927.",
+     "difficulty": "hard", "section": "cross-company multi-hop, sign trap", "answer_type": "number"},
 
 
     # ===== E. Derived figures: arithmetic is the thing under test =====
     # Every reference below was computed from figures already verified in
     # PROJECT_TRACKER.md and re-checked against the filings before being added.
 
-    {"id": "d01", "companies": ["NVIDIA", "AMD"], "derived": True,
-     "question": "Which company spent a larger share of its revenue on research and development, "
-                 "and by how many percentage points?",
-     "reference_answer": "AMD, by about 14.8 percentage points. AMD spent 8,091/34,639 = 23.4% of "
-                         "net revenue on R&D; NVIDIA spent 18,497/215,938 = 8.6%.",
-     "evidence": "NVIDIA income statement R&D $18,497, revenue $215,938. AMD income statement R&D $8,091, net revenue $34,639.",
-     "difficulty": "hard", "section": "derived ratio, both companies", "answer_type": "short-text"},
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "d01", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
+     "question": "Which company spent the largest share of its revenue on research and development, and by how many percentage points more than the next one?",
+     "reference_answer": "Intel, by about 2.7 percentage points. Intel spent 13,774/52,853 = 26.1%; AMD 8,091/34,639 = 23.4%; NVIDIA 18,497/215,938 = 8.6%.",
+     "evidence": "Intel R&D 13,774 on net revenue 52,853. AMD R&D 8,091 on net revenue 34,639. NVIDIA R&D 18,497 on revenue 215,938.",
+     "difficulty": "hard", "section": "derived ratio, all companies", "answer_type": "short-text"},
 
     # Reworded 2026-08-12. The first version asked about "four reportable segments", which is
     # wrong: AMD combined Client and Gaming into ONE reportable segment in Q1 FY2025, leaving
@@ -227,11 +275,15 @@ CROSS_SET = [
                  "and Gaming 3,910 shown as product lines within it); Embedded 3,454; Total 34,639.",
      "difficulty": "hard", "section": "segment note, three-number sum", "answer_type": "short-text"},
 
-    {"id": "d03", "companies": ["NVIDIA", "AMD"], "derived": True,
-     "question": "What was each company's net profit margin, and what is the gap between them in percentage points?",
-     "reference_answer": "NVIDIA 120,067/215,938 = 55.6%; AMD 4,335/34,639 = 12.5%. Gap about 43.1 percentage points.",
-     "evidence": "NVIDIA net income $120,067 on revenue $215,938. AMD net income $4,335 on net revenue $34,639.",
-     "difficulty": "hard", "section": "derived ratio, both companies", "answer_type": "short-text"},
+    # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
+    # corpus. This one still PASSED after Intel was added - it retrieved NVIDIA and AMD
+    # by luck. A stale item that passes is worse than one that fails, because nothing
+    # reports it.
+    {"id": "d03", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
+     "question": "Using net income attributable to shareholders, what was each company's net profit margin, and what is the gap between the highest and the lowest in percentage points?",
+     "reference_answer": "NVIDIA 120,067/215,938 = 55.6%; AMD 4,335/34,639 = 12.5%; Intel -267/52,853 = about -0.5%. Gap between highest and lowest is about 56.1 percentage points.",
+     "evidence": "NVIDIA net income 120,067 on revenue 215,938. AMD net income 4,335 on net revenue 34,639. Intel net loss attributable to Intel (267) on net revenue 52,853 - a negative margin.",
+     "difficulty": "hard", "section": "derived ratio, all companies, sign trap", "answer_type": "short-text"},
 
     {"id": "d04", "companies": ["NVIDIA", "AMD"], "derived": True,
      "question": "What were total liabilities as a percentage of total assets for each company, and which was lower?",
@@ -259,10 +311,15 @@ CROSS_SET = [
      "evidence": "NVIDIA income statement: net income 120,067 (FY2026), 29,760 (FY2024).",
      "difficulty": "hard", "section": "two-year growth", "answer_type": "short-text"},
 
-    {"id": "d08", "companies": ["NVIDIA", "AMD"], "derived": True,
-     "question": "What is the combined revenue of both companies for their latest fiscal years, and what share of that combined figure is AMD's?",
-     "reference_answer": "$250,577 million combined (215,938 + 34,639). AMD's share is about 13.8% (34,639 / 250,577).",
-     "evidence": "NVIDIA revenue 215,938 (FY2026). AMD net revenue 34,639 (FY2025).",
+    # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
+    # item said "the two"/"both" - a fact about the corpus, smuggled into the question.
+    # Intel FY2025 made that fact false, and a correct system started failing. The scope
+    # wording was fixed and the implicitness kept; references were updated only where the
+    # true answer genuinely changed.
+    {"id": "d08", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
+     "question": "What is the combined revenue of all the companies in these filings for their latest fiscal years, and what share of that combined figure is AMD's?",
+     "reference_answer": "$303,430 million combined (215,938 + 52,853 + 34,639). AMD's share is about 11.4% (34,639 / 303,430).",
+     "evidence": "NVIDIA revenue 215,938 (FY2026). Intel net revenue 52,853 (FY2025). AMD net revenue 34,639 (FY2025).",
      "difficulty": "hard", "section": "sum then ratio", "answer_type": "short-text"},
 
     {"id": "d09", "companies": ["AMD"], "derived": True,
@@ -284,7 +341,10 @@ def bucket(example):
         return "refusal"
     if example.get("derived"):          # arithmetic-heavy items, isolated on purpose
         return "derived"
-    return "needs-both" if len(example["companies"]) == 2 else "single-company"
+    # Renamed from "needs-both" on 2026-08-13. The old name was itself a corpus
+    # assumption: once Intel made three companies, "both" was wrong, and the test
+    # "== 2" silently reclassified three-company items as single-company.
+    return "cross-company" if len(example["companies"]) >= 2 else "single-company"
 
 if __name__ == "__main__":
     from collections import Counter
