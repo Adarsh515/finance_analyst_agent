@@ -12,7 +12,10 @@
 #   4. The planner may only ADD to what the old path already retrieves; a baseline
 #      job on the raw question is always appended so the agent can never retrieve
 #      less than the baseline does.
-#   5. Nothing about the corpus is hardcoded here. The list of filings is read from
+#   5. Reflect is a PAID call, so it fires only when the draft answer admits a gap.
+#      That is the Phase 3.5 router discipline restated: pay for the specialist only on
+#      a blank card, never in front of a path that already works.
+#   6. Nothing about the corpus is hardcoded here. The list of filings is read from
 #      the index, because the index is what actually gets searched. corpus.py says
 #      what we INTENDED to ingest; only the index knows what really landed.
 
@@ -27,10 +30,11 @@ from rag import llm, detect_companies, vectorstore, PROMPT, log_cost, to_text
 
 # --- Configuration ----------------------------------------------------------
 
-K_PER_JOB = 4      # chunks per job. Jobs vary with the question; k does not.
-MAX_JOBS = 6       # hard bound on planner jobs, enforced in code and never in the prompt.
-MAX_ROUNDS = 2     # hard bound on retrieval rounds. A bound in a prompt is negotiable.
-VERBOSE = True     # node-level logging. run_eval.py switches this off for full eval runs.
+K_PER_JOB        = 4     # chunks per job. Jobs vary with the question; k does not.
+MAX_JOBS         = 6     # hard bound on planner jobs, enforced in code, never in the prompt.
+MAX_ROUNDS       = 2     # hard bound on retrieval rounds. A bound in a prompt is negotiable.
+MAX_REFLECT_JOBS = 3     # hard bound on Reflect's follow-up jobs.
+VERBOSE          = True  # node logging. run_eval.py switches this off for full eval runs.
 
 # rag.llm is wrapped in a retry policy, and the wrapper hides with_structured_output().
 # Unwrap to the underlying chat model. getattr keeps this working if rag.py ever
@@ -137,6 +141,52 @@ Rules:
 - Prefer fewer jobs, but never merge concepts just to reduce the count.
 
 QUESTION: {question}"""
+
+
+
+class ReflectVerdict(BaseModel):
+    """What Reflect concludes after reading the draft answer it just produced."""
+    missing: str = Field(description="Short phrase naming what the draft could not find, "
+                                     "or an empty string if nothing is missing")
+    jobs: List[PlannedJob] = Field(description="Searches that would close the gap. "
+                                               "Empty when nothing is missing.")
+
+
+REFLECT_PROMPT = """You are reviewing a DRAFT ANSWER built from SEC filing excerpts. The draft
+reports that it could not find something. Decide what is missing and write the searches that
+would find it.
+
+The corpus contains exactly these filings, written as "COMPANY | PERIOD":
+{corpus}
+
+Rules:
+- One search has already been run. Write jobs that look somewhere DIFFERENT: another company,
+  another period, or another financial statement.
+- Often the draft has already worked out WHICH company or period it needs and only failed to
+  fetch the figure. Use what the draft established.
+- Same job rules as the planner: one figure from one statement per job; name the section and
+  two or three nearby line items; copy any period string exactly from the list above and pair
+  it only with that line's company; use "" when unsure.
+- If the draft is complete, or if the information genuinely is not in these filings, return NO
+  jobs at all. A refusal that is correct must stay a refusal.
+
+QUESTION: {question}
+
+DRAFT ANSWER: {answer}"""
+
+
+# A free, deterministic test. Reflect costs money, so it may only run when the draft itself
+# admits a gap. Matching on the answer's own words keeps the common path byte-identical.
+INCOMPLETE_MARKERS = (
+    "not stated", "does not state", "do not state", "not provided", "not available",
+    "not contained", "not disclosed", "cannot be determined", "unable to determine",
+    "no information",
+)
+
+
+def _looks_incomplete(answer: str) -> bool:
+    low = answer.lower()
+    return any(m in low for m in INCOMPLETE_MARKERS)
 
 
 # --- Nodes ------------------------------------------------------------------
@@ -256,12 +306,56 @@ def answer_node(state: AgentState) -> dict:
 
 
 def reflect_node(state: AgentState) -> dict:
-    """Judge whether the answer is complete; enqueue a follow-up job if not.
-    STUB: always satisfied, enqueues nothing. Deferred until a measured failure
-    needs it - see PROJECT_TRACKER.md, Phase 4.1."""
+    """Read the draft answer; if it admits a gap, queue the searches that would close it.
+
+    This is the fix for a DEPENDENT second hop - a question whose second search cannot be
+    written until the first one returns. x30 identifies AMD from a tax-benefit clue and then
+    needs AMD's balance sheet, which no planner could have written up front. At two filings
+    the planner covered that by guessing every candidate; at five it cannot.
+
+    Built in Phase 4.3 after being designed in 4.1 and deferred twice, because until x30
+    there was no measured failure that only this node could fix.
+    """
+    if state["rounds"] >= MAX_ROUNDS:
+        if VERBOSE:
+            print("[reflect] round cap reached, accepting the draft")
+        return {}
+
+    if not _looks_incomplete(state["answer"]):
+        if VERBOSE:
+            print("[reflect] draft reports no gap, no second round")
+        return {}
+
+    reflector = BASE_LLM.with_structured_output(ReflectVerdict, include_raw=True).with_retry(
+        stop_after_attempt=3
+    )
+    try:
+        result = reflector.invoke(REFLECT_PROMPT.format(
+            corpus=CORPUS_LINES, question=state["question"], answer=state["answer"]))
+        log_cost("gemini-3.1-flash-lite", result["raw"], label="agent-reflect")
+        verdict = result["parsed"]
+        if verdict is None:
+            raise ValueError(f"reflect output did not parse: {result.get('parsing_error')}")
+    except Exception as e:
+        # A failed reflection must never destroy a usable draft.
+        if VERBOSE:
+            print("[reflect] failed, accepting the draft:", e)
+        return {}
+
+    jobs: List[SearchJob] = []
+    for j in verdict.jobs[:MAX_REFLECT_JOBS]:          # bound enforced here, in code
+        valid = detect_companies(j.company)            # the LLM suggests, the code decides
+        company = valid[0] if valid else ""
+        period = j.period.strip()
+        if period and (company, period) not in KNOWN_PAIRS:
+            period = ""                                # unknown pair: drop the filter, stay honest
+        jobs.append({"company": company, "period": period, "query": j.query})
+
     if VERBOSE:
-        print("[reflect] after round", state["rounds"])
-    return {}
+        print(f"[reflect] missing: {verdict.missing!r} -> {len(jobs)} follow-up job(s)")
+        for j in jobs:
+            print(f"        {j['company'] or '-':7} | {j['period'][:38] or '-':40} | {j['query'][:70]}")
+    return {"jobs": jobs}
 
 
 def should_retry(state: AgentState) -> str:
