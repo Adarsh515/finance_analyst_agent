@@ -25,6 +25,7 @@ Examples:
 
 import argparse
 import json
+import statistics
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -86,7 +87,11 @@ def score_one(ex):
                           reference=ex["reference_answer"])
     g = groundedness_judge(question=ex["question"], prediction=ans,
                            context=out["context"])
-    return {"ex": ex, "answer": ans, "c": c, "g": g}
+    # Context size is a first-class metric from Phase 4.4 on. Characters, not tokens:
+    # exact, free, tokenizer-independent, and available for both paths. Roughly 4 chars
+    # per token for this corpus. A metric that is not on the scoreboard does not get
+    # optimised, and "I cut context by N%" is a claim that needs a before-number.
+    return {"ex": ex, "answer": ans, "c": c, "g": g, "ctx": len(out["context"])}
 
 
 def run_set(name, examples, bucket_fn=None):
@@ -116,7 +121,8 @@ def run_set(name, examples, bucket_fn=None):
             _emit(f"  [{done:3}/{total}] {ex['id']}  {mark}  grounded={r['g']['score']}  "
                   f"{r['answer'][:70]}")
             _record(args.out, {"set": name, "id": ex["id"], "correct": r["c"]["score"],
-                               "grounded": r["g"]["score"], "answer": r["answer"],
+                               "grounded": r["g"]["score"], "context_chars": r["ctx"],
+                               "answer": r["answer"],
                                "judge": r["c"].get("reasoning", "")})
 
     # Sort back into set order so two runs of the same set produce comparable files.
@@ -130,6 +136,12 @@ def run_set(name, examples, bucket_fn=None):
         print(f"\n  Scored {n}/{len(examples)}  ({len(errors)} infra errors skipped)")
         print(f"  Correctness : {corr}/{n} = {corr/n:.0%}")
         print(f"  Groundedness: {grnd}/{n} = {grnd/n:.0%}")
+
+        ctx = sorted(r["ctx"] for r in results)
+        p95 = ctx[min(len(ctx) - 1, int(0.95 * len(ctx)))]
+        print(f"  Context chars: median {statistics.median(ctx):,.0f}  "
+              f"mean {statistics.mean(ctx):,.0f}  p95 {p95:,}  max {ctx[-1]:,}  "
+              f"total {sum(ctx):,}")
 
     if bucket_fn:
         by = defaultdict(lambda: [0, 0])
