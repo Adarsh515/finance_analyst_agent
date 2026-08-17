@@ -44,8 +44,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 import judges
+import judges_rubric
+import judges_scope
 import rag
 from judges import correctness_judge, groundedness_judge
+from judges_rubric import rubric_judge
+from judges_scope import scope_judge
 from golden_set import GOLDEN_SET
 from cross_set import CROSS_SET, bucket
 
@@ -105,23 +109,30 @@ parser.add_argument("--workers", type=int, default=6,
                     help="concurrent questions (1 = serial)")
 parser.add_argument("--out", default="",
                     help="append each scored result to this JSONL file as it completes")
+parser.add_argument("--no-extra", action="store_true",
+                    help="skip the two Phase 4.5 scoreboards (rubric correctness, scope "
+                         "groundedness) and score exactly as before 4.5. They are ON by "
+                         "default deliberately: a scoreboard you have to remember to "
+                         "switch on is a scoreboard that will be missing from the run that "
+                         "mattered.")
 args = parser.parse_args()
+EXTRA = not args.no_extra
 
 if args.agent:
     import agent
     agent.VERBOSE = False              # silence node logs during a full eval run
     answer_fn = agent.run_agent
     PATH_NAME = "AGENT (LangGraph: plan -> retrieve -> answer)"
-    _patched = _install_cost_tracking(judges, rag, agent)
+    _patched = _install_cost_tracking(judges, rag, agent, judges_rubric, judges_scope)
 else:
     import rag as _rag_mod
     answer_fn = _rag_mod.answer_question
     PATH_NAME = "BASELINE (rag.answer_question)"
-    _patched = _install_cost_tracking(judges, rag)
+    _patched = _install_cost_tracking(judges, rag, judges_rubric, judges_scope)
 
 # A metric that silently measures nothing is worse than no metric. If the wrapper failed to
 # reach a module, say so now and loudly, not after a 25-minute run reports 0 tokens.
-assert len(_patched) >= 2, f"cost tracking reached only {_patched}"
+assert len(_patched) >= 4, f"cost tracking reached only {_patched}"
 
 ONLY_IDS = {i.strip() for i in args.ids.split(",") if i.strip()}
 _print_lock = threading.Lock()
@@ -160,6 +171,27 @@ def score_one(ex):
                           reference=ex["reference_answer"])
     g = groundedness_judge(question=ex["question"], prediction=ans,
                            context=out["context"])
+
+    # --- the two Phase 4.5 scoreboards, ADDED, never substituted ------------------------
+    # Every historical number in PROJECT_TRACKER.md was produced by the two judges above.
+    # Swapping either one would silently redefine the y-axis of every comparison in that
+    # file, so they keep running unchanged and these sit beside them.
+    #
+    # rubric   : correctness scored in CODE from per-fact observations. Beat the binary judge
+    #            11/11 vs 10/11 on hand-written paraphrases, with 0 wording-splits vs 1.
+    # scope    : groundedness of the CLAIM rather than of the figures. Measured 21/21 when
+    #            ANDed with the binary judge, against 18/21 for the binary judge alone.
+    #
+    # The AND is the operative part. Both groundedness judges fail by OMISSION - the binary
+    # one audits figures and skips the sentence, the scope one reads the sentence and waves
+    # through invented figures - so a claim has to survive both readings. What is NOT yet
+    # measured is what ANDing costs in false negatives on real answers at full scale; eight
+    # stored answers is not a sample. That is exactly what this run is for.
+    rub = sc = None
+    if EXTRA:
+        rub = rubric_judge(question=ex["question"], prediction=ans,
+                           reference=ex["reference_answer"])
+        sc = scope_judge(question=ex["question"], prediction=ans, context=out["context"])
     judge_calls, _calls.sink = _calls.sink, None
 
     # "generation" is the answer-writing call. It is isolated because it is the ONLY figure
@@ -171,7 +203,8 @@ def score_one(ex):
     # exact, free, tokenizer-independent, and available for both paths. Roughly 4 chars
     # per token for this corpus. A metric that is not on the scoreboard does not get
     # optimised, and "I cut context by N%" is a claim that needs a before-number.
-    return {"ex": ex, "answer": ans, "c": c, "g": g, "ctx": len(out["context"]),
+    return {"ex": ex, "answer": ans, "c": c, "g": g, "rub": rub, "sc": sc,
+            "ctx": len(out["context"]),
             "ctx_text": out["context"],
             "gen_in": gen_in, "gen_calls": gen_calls,
             "prod_in": sum(i for _l, i, _o, _m in product_calls),
@@ -204,10 +237,29 @@ def run_set(name, examples, bucket_fn=None):
                 continue
             results.append(r)
             mark = "PASS" if r["c"]["score"] == 1 else "FAIL"
-            _emit(f"  [{done:3}/{total}] {ex['id']}  {mark}  grounded={r['g']['score']}  "
-                  f"{r['answer'][:70]}")
+            extra = ""
+            if r["rub"] is not None:
+                # Only shown when a new judge DISAGREES with the old one. A column that
+                # repeats the previous column on 95% of rows teaches nothing and hides the
+                # 5% that matter.
+                flags = []
+                if r["rub"]["score"] != r["c"]["score"]:
+                    flags.append(f"rubric={r['rub']['score']}")
+                if r["sc"]["score"] != r["g"]["score"]:
+                    flags.append(f"scope={r['sc']['score']}")
+                extra = ("  [" + " ".join(flags) + "]") if flags else ""
+            _emit(f"  [{done:3}/{total}] {ex['id']}  {mark}  grounded={r['g']['score']}"
+                  f"{extra}  {r['answer'][:70]}")
             _record(args.out, {"set": name, "id": ex["id"], "correct": r["c"]["score"],
-                               "grounded": r["g"]["score"], "context_chars": r["ctx"],
+                               "grounded": r["g"]["score"],
+                               "rubric": r["rub"]["score"] if r["rub"] else None,
+                               "scope": r["sc"]["score"] if r["sc"] else None,
+                               "grounded_and": (min(r["g"]["score"], r["sc"]["score"])
+                                                if r["sc"] else None),
+                               "rubric_facts": (f"{r['rub']['facts_ok']}/"
+                                                f"{r['rub']['facts_total']}") if r["rub"] else None,
+                               "scope_why": r["sc"]["reasoning"][:300] if r["sc"] else None,
+                               "context_chars": r["ctx"],
                                "gen_input_tokens": r["gen_in"], "gen_calls": r["gen_calls"],
                                "product_input_tokens": r["prod_in"],
                                "product_output_tokens": r["prod_out"],
@@ -232,8 +284,48 @@ def run_set(name, examples, bucket_fn=None):
         corr = sum(r["c"]["score"] for r in results)
         grnd = sum(r["g"]["score"] for r in results)
         print(f"\n  Scored {n}/{len(examples)}  ({len(errors)} infra errors skipped)")
-        print(f"  Correctness : {corr}/{n} = {corr/n:.0%}")
-        print(f"  Groundedness: {grnd}/{n} = {grnd/n:.0%}")
+        print(f"  Correctness : {corr}/{n} = {corr/n:.0%}   <- the historical metric, "
+              f"comparable with every number in the tracker")
+        print(f"  Groundedness: {grnd}/{n} = {grnd/n:.0%}   <- likewise")
+
+        if results[0]["rub"] is not None:
+            rubr = sum(r["rub"]["score"] for r in results)
+            scop = sum(r["sc"]["score"] for r in results)
+            andd = sum(min(r["g"]["score"], r["sc"]["score"]) for r in results)
+            print(f"\n  NEW SCOREBOARDS (Phase 4.5) - reported beside the two above, never "
+                  f"averaged with them:")
+            print(f"  Correctness (rubric)     : {rubr}/{n} = {rubr/n:.0%}")
+            print(f"  Groundedness (scope only): {scop}/{n} = {scop/n:.0%}")
+            print(f"  Groundedness (binary AND scope): {andd}/{n} = {andd/n:.0%}"
+                  f"   <- the strict one")
+
+            # The disagreements ARE the measurement. Two judges that always agree tell you
+            # nothing; the rows where they part company are where the truth is contested,
+            # and every one of them needs reading by hand.
+            cdis = [r for r in results if r["rub"]["score"] != r["c"]["score"]]
+            gdis = [r for r in results if r["sc"]["score"] != r["g"]["score"]]
+            print(f"\n  correctness disagreements (binary vs rubric): {len(cdis)}")
+            for r in cdis:
+                print(f"    {r['ex']['id']:5} binary={r['c']['score']} rubric={r['rub']['score']}"
+                      f"  facts {r['rub']['facts_ok']}/{r['rub']['facts_total']}"
+                      f"  {str(r['rub']['reasoning'])[:90]}")
+            print(f"  groundedness disagreements (binary vs scope): {len(gdis)}")
+            for r in gdis:
+                print(f"    {r['ex']['id']:5} binary={r['g']['score']} scope={r['sc']['score']}"
+                      f"  {str(r['sc']['reasoning'])[:110]}")
+
+            # The number this run exists to produce. Every one of these is an answer the old
+            # scoreboard called grounded and the strict one does not - either a scope error
+            # the eval has been blind to, or a false negative the AND has just introduced.
+            # There is no way to tell which from the counts, so they are listed for reading.
+            newly = [r for r in results if r["g"]["score"] == 1 and r["sc"]["score"] == 0]
+            print(f"\n  answers the AND newly marks ungrounded: {len(newly)}/{grnd}"
+                  f" = {len(newly)/max(grnd,1):.0%} of previously-grounded answers")
+            print("  Each one is EITHER a scope error the eval could not see before, OR a")
+            print("  false negative the AND just introduced. The counts cannot tell them")
+            print("  apart - these have to be read:")
+            for r in newly:
+                print(f"    {r['ex']['id']:5} {str(r['sc']['reasoning'])[:150]}")
 
         def dist(label, values, fmt="{:,.0f}"):
             v = sorted(values)

@@ -63,15 +63,56 @@ def parse_filing(path, company, period, doc_type="10-K"):
 
     return pieces
 
+import re
+
+# A primary financial statement names its own totals EXACTLY. A note about a transaction
+# qualifies them: "Total assets acquired", "Total liabilities assumed". The qualifier is the
+# entire difference between the balance sheet and a purchase price allocation, and substring
+# matching is precisely what destroys it.
+#
+# This veto exists because of d04, the one known live failure of Phase 4.4. The answer gave
+# AMD's total assets as $7,546 million (the truth is $76,926 million). It was not a
+# hallucination: probe_titles.py showed the retrieved chunk was headed "AMD Consolidated
+# Balance Sheets" by THIS FUNCTION, because the acquisition note contains the words
+# "Total assets acquired" and "Total liabilities assumed". The model read our own false
+# sentence and reported it faithfully. Three tables out of 392 were titled this way.
+#
+# The veto only ever DEMOTES a title to the generic one. It never invents a new title, and
+# that restraint is deliberate: three MD&A summary tables look like income statements to a
+# row-label test and are not. A missing title costs retrieval a match. A false title is a
+# sentence the model reads, believes and cites - so when the two errors are not equally bad,
+# the rule is allowed to be one-sided.
+_EXACT_TOTAL = {
+    "income": r"^\s*(total\s+)?(net\s+)?revenue[s]?\s*$",
+    "balance": r"^\s*total assets\s*$",
+    "cashflow": r"^\s*net cash (provided|used)",
+}
+
+
+def _has_exact_row(text, pattern):
+    """True if some row's LABEL - its first cell, before any numbers - matches."""
+    for line in text.split("\n"):
+        if re.match(pattern, line.split("|")[0].strip(), re.I):
+            return True
+    return False
+
+
 def table_title(text, company, period, doc_type="10-K"):
     low = text.lower()
+    generic = f"{company} {doc_type} financial table - {period}:"
     if ("cost of revenue" in low or "cost of sales" in low) and "gross profit" in low:
+        if not _has_exact_row(text, _EXACT_TOTAL["income"]):
+            return generic
         return f"{company} Consolidated Statements of Income (income statement) - {period}, in millions:"
     if "total assets" in low and "total liabilities" in low:
+        if not _has_exact_row(text, _EXACT_TOTAL["balance"]):
+            return generic
         return f"{company} Consolidated Balance Sheets - {period}, in millions:"
     if "operating activities" in low and "financing activities" in low:
+        if not _has_exact_row(text, _EXACT_TOTAL["cashflow"]):
+            return generic
         return f"{company} Consolidated Statements of Cash Flows - {period}, in millions:"
-    return f"{company} {doc_type} financial table - {period}:"
+    return generic
 
 if __name__ == "__main__":
     # The filing list lives in corpus.py. It used to be duplicated here, which made
