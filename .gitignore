@@ -9,3 +9,4 @@ eval_*.txt
 eval_*.jsonl
 red_team*.jsonl
 app.db
+_to_delete/
