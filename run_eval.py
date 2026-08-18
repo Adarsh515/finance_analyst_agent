@@ -56,47 +56,18 @@ from cross_set import CROSS_SET, bucket
 load_dotenv()
 
 # --- token / cost accounting -------------------------------------------------
-# Every paid call in this project already passes through judges.log_cost() to be printed.
-# Wrapping that one function captures all of them without touching rag.py (contract 1:
-# rag.py is never modified) and without threading a counter through the graph.
+# MOVED to telemetry.py in Phase 6.3, unchanged in behaviour. The API has to record the same
+# per-call tuple this harness records, and a second implementation of one definition is the
+# cheapest possible way to make the product and the measurement disagree - two copies, each
+# self-consistent, drifting quietly. So there is one implementation and both import it.
 #
-# Each module that did `from judges import log_cost` holds its OWN name binding, so every
-# one of them has to be re-pointed. Patching only judges.log_cost would silently capture
-# nothing from rag.py and agent.py - the exact class of silent failure this project keeps
-# finding. The assertion below refuses to let that happen quietly.
+# The mechanism is unchanged and its sharp edge is unchanged with it: every module here does
+# `from judges import log_cost`, binding the function object into its OWN namespace, so each
+# importing module has to be re-pointed by name. telemetry.install() returns what it actually
+# patched and the assertion below still refuses a partial install - a capture that reached
+# three modules of five would under-report cost and look exactly like a cheap system.
 
-_calls = threading.local()          # per-worker-thread, so --workers > 1 stays correct
-
-
-def _tracked_log_cost(model, response, label=""):
-    bucket_ = getattr(_calls, "sink", None)
-    if bucket_ is not None:
-        u = getattr(response, "usage_metadata", None) or {}
-        bucket_.append((label,
-                        u.get("input_tokens", 0) or 0,
-                        u.get("output_tokens", 0) or 0,
-                        model))
-    return _ORIGINAL_LOG_COST(model, response, label=label)
-
-
-_ORIGINAL_LOG_COST = judges.log_cost
-
-
-def _install_cost_tracking(*modules):
-    patched = []
-    for mod in modules:
-        if mod is not None and getattr(mod, "log_cost", None) is _ORIGINAL_LOG_COST:
-            mod.log_cost = _tracked_log_cost
-            patched.append(mod.__name__)
-    return patched
-
-
-def _usd(calls):
-    total = 0.0
-    for _label, intok, outok, model in calls:
-        p_in, p_out = judges.PRICES.get(model, (0.0, 0.0))
-        total += (intok * p_in + outok * p_out) / 1_000_000
-    return total
+import telemetry
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--agent", action="store_true",
@@ -166,12 +137,12 @@ if args.agent:
     agent.GUARDS = not args.no_guards
     answer_fn = agent.run_agent
     PATH_NAME = "AGENT (LangGraph: plan -> retrieve -> answer)"
-    _patched = _install_cost_tracking(judges, rag, agent, judges_rubric, judges_scope)
+    _patched = telemetry.install(judges, rag, agent, judges_rubric, judges_scope)
 else:
     import rag as _rag_mod
     answer_fn = _rag_mod.answer_question
     PATH_NAME = "BASELINE (rag.answer_question)"
-    _patched = _install_cost_tracking(judges, rag, judges_rubric, judges_scope)
+    _patched = telemetry.install(judges, rag, judges_rubric, judges_scope)
 
 # A metric that silently measures nothing is worse than no metric. If the wrapper failed to
 # reach a module, say so now and loudly, not after a 25-minute run reports 0 tokens.
@@ -203,17 +174,17 @@ def score_one(ex):
     split is the point: judge tokens are the cost of KNOWING, product tokens are the cost of
     ANSWERING, and only the second is what a user would ever pay for.
     """
-    _calls.sink = []
-    t0 = time.perf_counter()
-    out = answer_fn(question=ex["question"])
-    secs = time.perf_counter() - t0
-    product_calls, _calls.sink = _calls.sink, []
+    with telemetry.capture() as product_calls:
+        t0 = time.perf_counter()
+        out = answer_fn(question=ex["question"])
+        secs = time.perf_counter() - t0
 
     ans = out["answer"]
-    c = correctness_judge(question=ex["question"], prediction=ans,
-                          reference=ex["reference_answer"])
-    g = groundedness_judge(question=ex["question"], prediction=ans,
-                           context=out["context"])
+    with telemetry.capture() as judge_calls:
+        c = correctness_judge(question=ex["question"], prediction=ans,
+                              reference=ex["reference_answer"])
+        g = groundedness_judge(question=ex["question"], prediction=ans,
+                               context=out["context"])
 
     # --- the two Phase 4.5 scoreboards, ADDED, never substituted ------------------------
     # Every historical number in PROJECT_TRACKER.md was produced by the two judges above.
@@ -230,19 +201,18 @@ def score_one(ex):
     # through invented figures - so a claim has to survive both readings. What is NOT yet
     # measured is what ANDing costs in false negatives on real answers at full scale; eight
     # stored answers is not a sample. That is exactly what this run is for.
-    rub = sc = None
-    if EXTRA and args.rubric:
-        rub = rubric_judge(question=ex["question"], prediction=ans,
-                           reference=ex["reference_answer"])
-    if EXTRA:
-        sc = scope_judge(question=ex["question"], prediction=ans, context=out["context"])
-    judge_calls, _calls.sink = _calls.sink, None
+        rub = sc = None
+        if EXTRA and args.rubric:
+            rub = rubric_judge(question=ex["question"], prediction=ans,
+                               reference=ex["reference_answer"])
+        if EXTRA:
+            sc = scope_judge(question=ex["question"], prediction=ans, context=out["context"])
 
     # "generation" is the answer-writing call. It is isolated because it is the ONLY figure
     # comparable with the pre-4.4 baseline (368,502 input tokens over 97 calls), which was
     # recorded before planner and Reflect tokens were logged separately.
-    gen_in = sum(i for lab, i, o, m in product_calls if "generation" in lab)
-    gen_calls = sum(1 for lab, i, o, m in product_calls if "generation" in lab)
+    prod = telemetry.summarise(product_calls)
+    gen_in, gen_calls = prod["gen_in"], prod["gen_calls"]
     # Context size is a first-class metric from Phase 4.4 on. Characters, not tokens:
     # exact, free, tokenizer-independent, and available for both paths. Roughly 4 chars
     # per token for this corpus. A metric that is not on the scoreboard does not get
@@ -251,9 +221,9 @@ def score_one(ex):
             "ctx": len(out["context"]),
             "ctx_text": out["context"],
             "gen_in": gen_in, "gen_calls": gen_calls,
-            "prod_in": sum(i for _l, i, _o, _m in product_calls),
-            "prod_out": sum(o for _l, _i, o, _m in product_calls),
-            "prod_usd": _usd(product_calls), "judge_usd": _usd(judge_calls),
+            "prod_in": prod["input_tokens"],
+            "prod_out": prod["output_tokens"],
+            "prod_usd": prod["usd"], "judge_usd": telemetry.usd(judge_calls),
             "secs": secs, "rounds": out.get("rounds")}
 
 

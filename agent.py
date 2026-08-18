@@ -152,6 +152,11 @@ class AgentState(TypedDict):
     jobs: List[SearchJob]    # work queue: Plan and Reflect enqueue, Retrieve drains
     chunks: List[Document]   # accumulated across rounds, de-duplicated by chunk id
     seen_ids: List[str]      # every chunk id retrieval ever touched - a RECORD, not a filter
+    jobs_log: List[SearchJob]  # every job ever PLANNED, in order, never drained. `jobs` is a
+                             # work queue and retrieve_node empties it, so by the time the
+                             # graph finishes there is no record of what was planned - which
+                             # made the 6.3 trace panel show an empty plan on every question.
+                             # Same shape as seen_ids: accumulate, never consume.
     answer: str              # output of the Answer node
     context: str             # exact context string sent to the model, needed by the judge
     rounds: int              # retrieval rounds completed - the hard loop bound
@@ -318,7 +323,8 @@ def plan_node(state: AgentState) -> dict:
         # Never crash the pipeline. Degrade to the old path's single unfiltered search.
         if VERBOSE:
             print("[plan] planner failed, falling back to one unfiltered job:", e)
-        return {"jobs": [{"company": "", "period": "", "query": state["question"]}],
+        fallback = [{"company": "", "period": "", "query": state["question"]}]
+        return {"jobs": fallback, "jobs_log": list(state.get("jobs_log") or []) + fallback,
                 "companies": []}
 
     jobs: List[SearchJob] = []
@@ -351,7 +357,8 @@ def plan_node(state: AgentState) -> dict:
         print("[plan]", len(jobs), "job(s):")
         for j in jobs:
             print(f"        {j['company'] or '-':7} | {j['period'][:38] or '-':40} | {j['query'][:70]}")
-    return {"jobs": jobs, "companies": companies}
+    return {"jobs": jobs, "jobs_log": list(state.get("jobs_log") or []) + jobs,
+            "companies": companies}
 
 
 def _chroma_filter(job: SearchJob):
@@ -665,7 +672,7 @@ def reflect_node(state: AgentState) -> dict:
         print(f"[reflect] missing: {verdict.missing!r} -> {len(jobs)} follow-up job(s)")
         for j in jobs:
             print(f"        {j['company'] or '-':7} | {j['period'][:38] or '-':40} | {j['query'][:70]}")
-    return {"jobs": jobs}
+    return {"jobs": jobs, "jobs_log": list(state.get("jobs_log") or []) + jobs}
 
 
 def should_retry(state: AgentState) -> str:
@@ -700,6 +707,7 @@ def run_agent(question: str) -> dict:
         "jobs": [],
         "chunks": [],
         "seen_ids": [],
+        "jobs_log": [],
         "answer": "",
         "context": "",
         "rounds": 0,
