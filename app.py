@@ -19,6 +19,7 @@
 # Run:  uvicorn app:app --reload --port 8000
 # Test: python test_app.py     (no API key, no network, no cost)
 
+import json
 import os
 import secrets
 from typing import List, Optional
@@ -29,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import auth
+import cache
 import db
 
 load_dotenv()
@@ -70,6 +72,19 @@ agent.VERBOSE = False
 # reproduce the pre-5.1 system; there is no equivalent reason to serve a user that way, and
 # a flag that can be flipped in one place and forgotten in another is how it would happen.
 assert agent.GUARDS is True, "refusing to serve with agent.GUARDS = False"
+
+# --- the cache, and where it deliberately is NOT ------------------------------------------
+# Phase 6.5's contract is "cache OFF during evals". That is satisfied here STRUCTURALLY, not
+# by a flag: the cache is consulted in this file only. run_eval.py and red_team.py call
+# agent.run_agent directly and cannot reach it. A flag would have been one forgotten line
+# away from the failure lesson 96 records - a harness whose default contradicted the shipped
+# configuration for weeks without anyone noticing.
+#
+# The fingerprint is computed once, at import, from what the index actually holds, and it is
+# part of the cache KEY. A rebuilt corpus therefore cannot reach an old entry at all - the
+# rows become unreachable rather than merely stale.
+CACHE_FINGERPRINT = cache.index_fingerprint(agent.FILINGS)
+CACHE_ENABLED = os.environ.get("CACHE_OFF", "").lower() not in ("1", "true", "yes")
 
 
 # --- database, one connection per request -----------------------------------------------------
@@ -192,6 +207,7 @@ def health():
     one tells you which system is alive.
     """
     return {"status": "ok", "filings": len(agent.FILINGS),
+            "cache_enabled": CACHE_ENABLED, "cache_fingerprint": CACHE_FINGERPRINT,
             "guards": agent.GUARDS, "guard_prompt": agent.GUARD_PROMPT,
             "schema_version": db.SCHEMA_VERSION, "cookie_secure": COOKIE_SECURE,
             # Reported because it can be off for a reason nobody remembers. On 2026-08-18 the
@@ -332,9 +348,33 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
 
     db.add_message(conn, conversation_id, "user", question)
 
-    # THE CONTRACT. Same function the eval calls, same capture the eval uses.
+    # --- the cache, consulted BEFORE anything is paid for -----------------------------------
+    # Keyed on the question as asked. From 6.4 a follow-up would have to be keyed on the
+    # REWRITTEN question instead - "aur uska net income?" means something different in every
+    # conversation and is a catastrophic cache key - and the rewrite costs a call, so a
+    # conversation turn is looked up only after it has been rewritten. Single-turn questions,
+    # which is what a cache actually helps with, are looked up for free right here.
     import time
     t0 = time.perf_counter()
+    hit = cache.get(conn, question, CACHE_FINGERPRINT) if CACHE_ENABLED else None
+    if hit is not None:
+        message_id = db.add_message(conn, conversation_id, "assistant", hit["answer"])
+        db.save_trace(
+            conn, message_id=message_id, conversation_id=conversation_id, user_id=user["id"],
+            question_raw=question, question_rewritten=None,
+            jobs=json.loads(hit["jobs_json"]) if hit["jobs_json"] else None,
+            filings=json.loads(hit["filings_json"]) if hit["filings_json"] else None,
+            chunk_ids=json.loads(hit["chunk_ids_json"]) if hit["chunk_ids_json"] else None,
+            rounds=hit["rounds"], reflect_fired=False, guard_fired="", cache_hit=True,
+            # NO calls, so this user's spend correctly records ZERO for this question. The
+            # trace row is still theirs; only the money is not.
+            calls=(), seconds=round(time.perf_counter() - t0, 3))
+        return {"conversation_id": conversation_id, "message_id": message_id,
+                "answer": hit["answer"], "context": hit["context"],
+                "rounds": hit["rounds"], "guard_fired": "", "cache_hit": True,
+                "trace": db.get_trace(conn, message_id)}
+
+    # THE CONTRACT. Same function the eval calls, same capture the eval uses.
     with telemetry.capture() as calls:
         out = agent.run_agent(question=question)
     seconds = round(time.perf_counter() - t0, 3)
@@ -367,10 +407,24 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
         cache_hit=False,                  # Phase 6.5 fills this in
         calls=telemetry.rows_for_db(calls),
         seconds=seconds)
+    totals = telemetry.summarise(calls)
+
+    # Store only after the guards have had their say. cacheable() refuses anything produced
+    # under attack or any refusal, and it says which - recorded rather than silent, so a cache
+    # that is never filling up is visible instead of merely disappointing.
+    stored, why_not = (cache.put(
+        conn, question=question, fingerprint=CACHE_FINGERPRINT, answer=answer,
+        context=out["context"], guard_fired=out.get("guard_fired") or "",
+        jobs=out.get("jobs_log") or None, filings=filings_used,
+        chunk_ids=[c for c in chunk_ids if c], rounds=out.get("rounds"),
+        input_tokens=totals["input_tokens"], output_tokens=totals["output_tokens"],
+        usd=totals["usd"], user_id=user["id"]) if CACHE_ENABLED else (False, "cache disabled"))
 
     return {
         "conversation_id": conversation_id,
         "message_id": message_id,
+        "cache_hit": False,
+        "cached": stored, "not_cached_because": why_not,
         # the same fields run_eval.py scores, under the same names the agent returns them by
         "answer": answer,
         "context": out["context"],

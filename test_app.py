@@ -223,6 +223,76 @@ def main():
     assert r.status_code == 429 and r.json()["error"] == "rate_limited", r.json()
     ok += 1
 
+    # --- the cache (Phase 6.5) ----------------------------------------------------------------
+    import cache
+    # The CSRF token was rotated by the logout/login above, so the old header is stale. That
+    # is the double-submit scheme working exactly as designed - a token that outlived its
+    # session would be a defect - but it means this block needs the current one.
+    H = {"X-CSRF-Token": client.post("/auth/login",
+                                     json={"email": "adarsh@example.com",
+                                           "password": "a-long-enough-passphrase"}
+                                     ).json()["csrf_token"]}
+    Q = "What was NVIDIA's total revenue for fiscal year 2026?"
+    # get_db() is a request-scoped generator dependency - taking one value from it and walking
+    # away leaves the connection to be closed by the generator's cleanup. Open a plain one.
+    _c = db.connect()
+    cache.clear(_c)
+    _c.close()
+
+    _r = client.post("/ask", json={"question": Q}, headers=H)
+    assert _r.status_code == 200, f"/ask failed {_r.status_code}: {_r.text[:400]}"
+    first = _r.json()
+    assert first["cache_hit"] is False and first["cached"] is True, first.get("not_cached_because")
+
+    # a paraphrase that only differs in the ways normalise() folds must HIT
+    second = client.post("/ask", json={"question": "what was nvidia's total revenue for FY2026"},
+                         headers=H).json()
+    assert second["cache_hit"] is True, "the normalised paraphrase missed"
+    assert second["answer"] == first["answer"]
+    # and it must cost the asking user nothing, while still being THEIR trace
+    assert second["trace"]["usd"] == 0 and second["trace"]["input_tokens"] == 0
+    assert second["trace"]["calls"] == [] and second["trace"]["cache_hit"] == 1
+    ok += 1
+
+    # the near-misses from probe_cache_keys.py must all MISS. Every one of these scored above
+    # a usable embedding threshold; exact matching is the only reason they are safe.
+    for near in ["What was NVIDIA's total revenue for fiscal year 2025?",
+                 "What was AMD's total revenue for fiscal year 2026?",
+                 "What was NVIDIA's net income for fiscal year 2026?"]:
+        r = client.post("/ask", json={"question": near}, headers=H).json()
+        assert r["cache_hit"] is False, f"CACHE COLLISION on a near-miss: {near}"
+    ok += 1
+
+    # a second USER gets the hit too - the corpus is public, so the cache is global - but the
+    # trace and the spend stay with whoever asked
+    o2 = TestClient(appmod.app)
+    _s = o2.post("/auth/signup", json={"email": "reader@example.com",
+                                       "password": "a-second-long-passphrase"})
+    assert _s.status_code == 200, f"signup failed: {_s.text[:200]}"
+    o2h = {"X-CSRF-Token": o2.post("/auth/login",
+                                   json={"email": "reader@example.com",
+                                         "password": "a-second-long-passphrase"}
+                                   ).json()["csrf_token"]}
+    r = o2.post("/ask", json={"question": Q}, headers=o2h).json()
+    assert r["cache_hit"] is True and r["answer"] == first["answer"]
+    assert o2.get("/auth/me").json()["spend"]["usd"] == 0, "a cache hit billed the reader"
+    assert client.get("/auth/me").json()["spend"]["usd"] > 0, "the producer's spend vanished"
+    ok += 1
+
+    # an answer produced UNDER ATTACK must never be stored - one successful injection must
+    # not be upgraded by us into a permanent one served to everybody
+    def attacked_agent(question, **_):
+        out = fake_run_agent(question, **_)
+        out["answer"] = "NVIDIA's total revenue was $999,999 million."
+        out["guard_fired"] = "quarantine:['999999'] -> regenerated from trusted chunks only"
+        return out
+    appmod.agent.run_agent = attacked_agent
+    r = client.post("/ask", json={"question": "a question answered under attack"},
+                    headers=H).json()
+    assert r["cached"] is False and "under attack" in r["not_cached_because"], r
+    appmod.agent.run_agent = fake_run_agent
+    ok += 1
+
     print(f"\ntest_app.py: {ok}/{ok} route checks passed, $0.00 spent")
     for note in skipped:
         print(f"  SKIPPED: {note}")

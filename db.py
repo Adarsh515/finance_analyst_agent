@@ -32,7 +32,8 @@ DB_PATH = os.environ.get("APP_DB", "app.db")
 # v1  2026-08-18  Phase 6.1  baseline: users, credentials, sessions, conversations,
 #                            messages, traces, trace_calls
 # v2  2026-08-18  Phase 6.2  login_attempts (rate limiting)
-SCHEMA_VERSION = 2
+# v3  2026-08-18  Phase 6.5  answer_cache (exact-match, fingerprint in the key)
+SCHEMA_VERSION = 3
 
 
 def utcnow():
@@ -202,6 +203,32 @@ MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS ix_attempts_email ON login_attempts(email, attempted_at);
     CREATE INDEX IF NOT EXISTS ix_attempts_ip    ON login_attempts(ip, attempted_at);
+    """,
+    # Phase 6.5. GLOBAL by design - these are answers about public filings, identical for
+    # every reader, so per-user rows would cost hit rate and buy nothing. `fingerprint` is
+    # part of the KEY (see cache.key_for), not merely stored here, so a rebuilt index cannot
+    # reach an old row rather than merely being expected not to.
+    3: """
+    CREATE TABLE IF NOT EXISTS answer_cache (
+        key_hash            TEXT PRIMARY KEY,
+        normalised_question TEXT NOT NULL,
+        question            TEXT NOT NULL,
+        answer              TEXT NOT NULL,
+        context             TEXT,
+        jobs_json           TEXT,
+        filings_json        TEXT,
+        chunk_ids_json      TEXT,
+        rounds              INTEGER,
+        input_tokens        INTEGER NOT NULL DEFAULT 0,
+        output_tokens       INTEGER NOT NULL DEFAULT 0,
+        usd                 REAL    NOT NULL DEFAULT 0.0,
+        fingerprint         TEXT NOT NULL,
+        created_by          INTEGER,
+        created_at          TEXT NOT NULL,
+        hits                INTEGER NOT NULL DEFAULT 0,
+        last_hit_at         TEXT
+    );
+    CREATE INDEX IF NOT EXISTS ix_cache_fp ON answer_cache(fingerprint);
     """,
 }
 
@@ -517,9 +544,10 @@ if __name__ == "__main__":
     v1.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)", (utcnow(),))
     v1.commit()
     assert schema_version(v1) == 1
-    assert migrate(v1) == [2] and schema_version(v1) == 2
+    assert migrate(v1) == [2, 3] and schema_version(v1) == 3
     assert migrate(v1) == [], "migrate() is not idempotent - it re-applied a done migration"
     v1.execute("SELECT COUNT(*) FROM login_attempts")     # raises if the table is missing
+    v1.execute("SELECT COUNT(*) FROM answer_cache")
     ok += 1
 
     uid = create_user(c, "Adarsh@Example.COM", "Adarsh")

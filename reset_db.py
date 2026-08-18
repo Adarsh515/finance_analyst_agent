@@ -18,7 +18,7 @@ import sys
 import db
 
 TABLES = ("users", "credentials", "sessions", "conversations", "messages",
-          "traces", "trace_calls")
+          "traces", "trace_calls", "login_attempts", "answer_cache")
 
 
 def counts(conn):
