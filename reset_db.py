@@ -33,7 +33,14 @@ def counts(conn):
 
 def show(conn, path):
     c = counts(conn)
-    print(f"\n  {path}  (schema v{db.schema_version(conn)})")
+    v = db.schema_version(conn)
+    print(f"\n  {path}  (schema v{v})")
+    if v < db.SCHEMA_VERSION:
+        # A file that is behind the code is the state where everything looks fine until one
+        # query hits a table that does not exist yet. Say it out loud, every time it is true.
+        print(f"  ** BEHIND: the code is at v{db.SCHEMA_VERSION}. "
+              f"Run  python reset_db.py --init  to apply "
+              f"{', '.join(f'v{n}' for n in sorted(db.MIGRATIONS) if n > v)}.")
     print(f"  {'table':16} {'rows':>8}")
     for t in TABLES:
         n = c[t]

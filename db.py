@@ -24,11 +24,15 @@ from datetime import datetime, timedelta, timezone
 
 DB_PATH = os.environ.get("APP_DB", "app.db")
 
-# Schema version. Every future change gets a new numbered migration in MIGRATIONS below and
-# bumps this. Recording the version from day one costs one table and removes the question
-# "which shape is this file?" forever - a question that is unanswerable at exactly the
-# moment it matters, which is when someone else's copy behaves differently from yours.
-SCHEMA_VERSION = 1
+# Schema version. Every change gets a new numbered entry in MIGRATIONS below and bumps this.
+# Recording the version from day one costs one table and removes the question "which shape is
+# this file?" forever - a question that is unanswerable at exactly the moment it matters,
+# which is when someone else's copy behaves differently from yours.
+#
+# v1  2026-08-18  Phase 6.1  baseline: users, credentials, sessions, conversations,
+#                            messages, traces, trace_calls
+# v2  2026-08-18  Phase 6.2  login_attempts (rate limiting)
+SCHEMA_VERSION = 2
 
 
 def utcnow():
@@ -175,6 +179,47 @@ CREATE TABLE IF NOT EXISTS trace_calls (
 """
 
 
+# --- migrations ---------------------------------------------------------------------------
+# SCHEMA above is the v1 BASELINE and is never edited again. Every later change is a numbered
+# entry here, applied in order to whatever version the file is already at.
+#
+# This is deliberately more machinery than one extra table needs. The point is that the first
+# migration happens NOW, while `app.db` holds one seeded demo row and a mistake costs nothing
+# - not in Phase 6.6 with the learner's real chat history in it. A migration path that has
+# never been executed is not a migration path, it is a plan.
+
+MIGRATIONS = {
+    # Phase 6.2. Deliberately NOT foreign-keyed to users: the whole purpose is to record
+    # attempts against addresses that do not exist, which is exactly when someone is
+    # guessing. A FK here would silently drop the attacker's most interesting rows.
+    2: """
+    CREATE TABLE IF NOT EXISTS login_attempts (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        email        TEXT NOT NULL COLLATE NOCASE,
+        ip           TEXT,
+        succeeded    INTEGER NOT NULL,
+        attempted_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ix_attempts_email ON login_attempts(email, attempted_at);
+    CREATE INDEX IF NOT EXISTS ix_attempts_ip    ON login_attempts(ip, attempted_at);
+    """,
+}
+
+
+def migrate(conn):
+    """Apply every migration newer than the file's recorded version. Returns those applied."""
+    current = schema_version(conn)
+    applied = []
+    for version in sorted(MIGRATIONS):
+        if version > current:
+            conn.executescript(MIGRATIONS[version])
+            conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) "
+                         "VALUES (?,?)", (version, utcnow()))
+            conn.commit()
+            applied.append(version)
+    return applied
+
+
 def connect(path=None):
     """Open a connection with the three PRAGMAs that SQLite does NOT set for you.
 
@@ -192,11 +237,12 @@ def connect(path=None):
 
 
 def init_db(conn):
-    """Create the schema if absent and record the version. Safe to call on every startup."""
+    """Create the v1 baseline if absent, then bring the file up to date. Safe on every start."""
     conn.executescript(SCHEMA)
-    conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?,?)",
-                 (SCHEMA_VERSION, utcnow()))
+    conn.execute("INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1,?)",
+                 (utcnow(),))
     conn.commit()
+    migrate(conn)
     return conn
 
 
@@ -406,6 +452,43 @@ def get_trace(conn, message_id):
     return out
 
 
+# --- login attempts (Phase 6.2 rate limiting) -----------------------------------------------
+# Stored, not held in memory, for one reason: an in-memory counter resets when the process
+# restarts, and "restart the server" is not a step an attacker finds difficult.
+
+def record_attempt(conn, email, succeeded, ip=None):
+    conn.execute("INSERT INTO login_attempts (email, ip, succeeded, attempted_at) "
+                 "VALUES (?,?,?,?)", (email.strip(), ip, int(bool(succeeded)), utcnow()))
+    conn.commit()
+
+
+def recent_failures(conn, since_iso, email=None, ip=None):
+    """Failures for one address or one IP inside a time window, counted only since the last
+    SUCCESS. A successful login clears the slate; otherwise one legitimate typo a month
+    accumulates into a permanent lockout on a long-lived account.
+
+    THE TIME WINDOW AND THE ORDERING ARE TWO DIFFERENT JOBS, and this function was wrong the
+    first time for mixing them. `utcnow()` is second-precision, chosen so the tables are
+    readable in a plain `sqlite3` prompt - which means a success and the failure that follows
+    it routinely carry the SAME timestamp, and `attempted_at > last_success_time` then drops
+    the failure. A brute-force loop lands many attempts per second, so this is not a corner
+    case; it is the normal case for the exact traffic this function exists to count.
+
+    So: `since_iso` bounds the WINDOW (a wall-clock question), and the autoincrement `id`
+    orders EVENTS (a sequence question). A second-precision timestamp is not a sort key.
+    """
+    field, value = ("email", email.strip()) if email is not None else ("ip", ip)
+    if value is None:
+        return 0
+    last_ok_id = conn.execute(
+        f"SELECT COALESCE(MAX(id), 0) AS i FROM login_attempts "
+        f"WHERE {field} = ? AND succeeded = 1", (value,)).fetchone()["i"]
+    return conn.execute(
+        f"SELECT COUNT(*) AS n FROM login_attempts "
+        f"WHERE {field} = ? AND succeeded = 0 AND id > ? AND attempted_at >= ?",
+        (value, last_ok_id, since_iso)).fetchone()["n"]
+
+
 def user_spend(conn, user_id):
     row = conn.execute(
         "SELECT COUNT(*) AS questions, COALESCE(SUM(input_tokens),0) AS input_tokens, "
@@ -424,6 +507,19 @@ if __name__ == "__main__":
     ok = 0
 
     assert schema_version(c) == SCHEMA_VERSION
+    ok += 1
+
+    # The migration path is exercised, not assumed. A v1 file must come up to v2 by itself,
+    # and re-running must be a no-op - a migration that is not idempotent will be applied
+    # twice by the first person who restarts the server during a deploy.
+    v1 = connect(":memory:")
+    v1.executescript(SCHEMA)
+    v1.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)", (utcnow(),))
+    v1.commit()
+    assert schema_version(v1) == 1
+    assert migrate(v1) == [2] and schema_version(v1) == 2
+    assert migrate(v1) == [], "migrate() is not idempotent - it re-applied a done migration"
+    v1.execute("SELECT COUNT(*) FROM login_attempts")     # raises if the table is missing
     ok += 1
 
     uid = create_user(c, "Adarsh@Example.COM", "Adarsh")
@@ -500,6 +596,27 @@ if __name__ == "__main__":
 
     spend = user_spend(c, uid)
     assert spend["questions"] == 1 and spend["input_tokens"] == 7736
+    ok += 1
+
+    # failures accumulate, and a SUCCESS clears the slate - otherwise one typo a month
+    # eventually locks a long-lived account out permanently.
+    epoch = "1970-01-01T00:00:00Z"
+    for _ in range(3):
+        record_attempt(c, "attacker@example.com", False, ip="10.0.0.9")
+    assert recent_failures(c, epoch, email="attacker@example.com") == 3
+    assert recent_failures(c, epoch, ip="10.0.0.9") == 3
+    # attempts are recorded for addresses that do not exist - that is the interesting case
+    assert get_user_by_email(c, "attacker@example.com") is None
+    # These three land in the SAME SECOND, which is the case that broke the first version:
+    # ordering by a second-precision timestamp dropped the failures that followed a success.
+    record_attempt(c, "attacker@example.com", True, ip="10.0.0.9")
+    record_attempt(c, "attacker@example.com", False, ip="10.0.0.9")
+    record_attempt(c, "attacker@example.com", False, ip="10.0.0.9")
+    rows = c.execute("SELECT attempted_at FROM login_attempts ORDER BY id DESC LIMIT 3").fetchall()
+    assert len({r["attempted_at"] for r in rows}) == 1, "same-second case not exercised"
+    assert recent_failures(c, epoch, email="attacker@example.com") == 2
+    # a window in the future must exclude everything, so the window is not vacuous either
+    assert recent_failures(c, "2099-01-01T00:00:00Z", email="attacker@example.com") == 0
     ok += 1
 
     # one trace per assistant message, enforced by the database rather than by a comment
