@@ -59,8 +59,10 @@ import judges           # noqa: E402
 import rag              # noqa: E402
 import telemetry        # noqa: E402
 
-_patched = telemetry.install(judges, rag, agent)
-assert len(_patched) >= 2, f"cost tracking reached only {_patched}"
+import rewriter      # noqa: E402  - holds its own log_cost binding; see run_eval.py
+
+_patched = telemetry.install(judges, rag, agent, rewriter)
+assert len(_patched) >= 3, f"cost tracking reached only {_patched}"
 
 agent.VERBOSE = False
 

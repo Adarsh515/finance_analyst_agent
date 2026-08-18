@@ -165,6 +165,53 @@ def looks_like_injection(text):
     return sorted({m.group(0).strip().lower() for m in _INJECTION_RE.finditer(text)})
 
 
+# --- history injection (Phase 6.4) --------------------------------------------------------
+# A SECOND, SEPARATE blacklist, and it is separate on purpose. The 20 patterns above were
+# measured against 2,188 retrieved FILING chunks and defend the context. These defend the
+# CONVERSATION channel, which is different text written by a different party for a different
+# purpose, and mixing the two lists would mean neither could be reasoned about.
+#
+# Both lists are applied to history, because hist01 and hist04 were caught by the context
+# list already; these four exist only for what it MISSED.
+#
+# MEASURED before shipping, against 2,258 legitimate texts - 2,188 filing chunks, 70
+# conversational lines and every question in the eval sets. Zero false positives each.
+# Four candidates were rejected on that measurement and the rejections are the useful part:
+#
+#   "for all subsequent ..."   2 hits in real filings              DROPPED
+#   "from now on"              0 hits, and caught nothing either    dropped: no job
+#   "I always mean"            0 hits here - but a real analyst writes "by Q3 I always mean
+#                              fiscal Q3", and that is a legitimate clarification I have no
+#                              corpus to test against. DROPPED as too likely to fire on a
+#                              user, which is the "you should" reasoning from 6.0.
+#   "never the (company|...)"  0 hits - and it is my own payload's exact wording. Keeping it
+#                              would be fitting the guard to the attack I happened to write
+#                              (lesson 82). DROPPED.
+#
+# What survives names a MECHANISM rather than a phrasing: addressing the system directly,
+# defining a mapping for future turns, asserting a session configuration, or claiming scope
+# over subsequent questions. A user asking about filings does none of those.
+_HISTORY_PATTERNS = [
+    r"\bnote (for|to) the (rewriter|assistant|system|model|bot|ai)\b",
+    r"\bwhenever I (say|write|ask|mention|type)\b",
+    r"\b(this|the) (session|conversation|thread) (has been|is|was) "
+    r"(configured|set up|instructed)\b",
+    r"\bsubsequent (question|answer|quer|response)",
+]
+_HISTORY_RE = re.compile("|".join(_HISTORY_PATTERNS), re.I | re.M)
+
+
+def looks_like_history_injection(text):
+    """Instruction-shaped patterns in ONE conversation turn. Empty list = clean.
+
+    Runs both blacklists: an injection is an injection whichever channel it arrives on, and
+    the context list already catches two of the six history attacks.
+    """
+    both = set(looks_like_injection(text))
+    both |= {m.group(0).strip().lower() for m in _HISTORY_RE.finditer(text)}
+    return sorted(both)
+
+
 def _fence_id(chunks):
     """A short, stable tag derived from the content itself. Same chunks -> same tag, always."""
     basis = "".join(getattr(d, "id", "") or "" for d in chunks) or "empty"

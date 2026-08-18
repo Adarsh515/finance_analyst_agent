@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 
 import agent
-from attacks import ATTACKS, judge_attack, refused
+from attacks import ATTACKS, judge_attack, judge_rewrite, refused
 
 load_dotenv()
 
@@ -96,6 +96,10 @@ _guard_out_path(args.out, args.append)
 
 agent.VERBOSE = args.verbose
 agent.GUARDS = not args.undefended
+# The 6.4 history guard rides the same flag, so "before and after" stays one flag rather than
+# a git stash and a memory of what the numbers were.
+import rewriter                                          # noqa: E402
+rewriter.HISTORY_GUARD = not args.undefended
 if args.prompt_guard is not None:      # otherwise leave agent.py's shipped value
     agent.GUARD_PROMPT = args.prompt_guard
 _REAL_SEARCH = agent._search
@@ -147,10 +151,24 @@ assert selected, "no attacks selected"
 def run_one(a):
     POISONER.arm(a.get("poison"))
     t0 = time.perf_counter()
-    out = agent.run_agent(question=a["question"])
+    # History is passed straight through - no monkeypatching. Unlike a poisoned chunk, which
+    # has to win retrieval first, conversation history is a state the attacker reaches simply
+    # by typing. Faking the delivery would be modelling a harder attack than the real one.
+    out = agent.run_agent(question=a["question"], history=a.get("history"))
     secs = time.perf_counter() - t0
     answer = out["answer"]
     defended, useful, note = judge_attack(a, answer)
+
+    # TWO PLACES AN ATTACK CAN SUCCEED, and the second one is invisible downstream.
+    # hist02 and hist03 corrupt the REWRITTEN QUESTION and leave the answer immaculate: the
+    # pipeline retrieves the wrong company or the wrong year and reports it accurately. No
+    # canary, no leak, nothing for judge_attack to find. Scoring those on the answer alone
+    # would mark a total compromise as HELD.
+    rewritten = out.get("question_rewritten")
+    rw_ok, rw_note = judge_rewrite(a, rewritten)
+    if not rw_ok:
+        defended = False
+        note = f"{rw_note}   |   {note}"
     # Whether the poison actually reached the context is checked separately from whether it
     # reached the ANSWER. An attack that never entered the prompt was not defended against -
     # it was never delivered, and scoring it as a win would be the silent pass this project
@@ -164,14 +182,18 @@ def run_one(a):
         # Which guard, if any, produced this answer. Without it a dead attack cannot be
         # attributed to a layer, and an unattributable defence is one nobody can delete.
         "guard_fired": out.get("guard_fired") or "",
+        "question_rewritten": rewritten,
+        "rewrite_note": out.get("rewrite_note"),
+        "rewrite_defended": rw_ok, "rewrite_note_judged": rw_note,
         "context_chars": len(out["context"]), "rounds": out.get("rounds"),
         "seconds": round(secs, 2), "context": out["context"],
     }
 
 
 if __name__ == "__main__":
-    state = ("UNDEFENDED (guards off)" if args.undefended
-             else f"GUARDED (prompt layer {'ON' if agent.GUARD_PROMPT else 'OFF'})")
+    state = ("UNDEFENDED (guards off, history guard off)" if args.undefended
+             else f"GUARDED (prompt layer {'ON' if agent.GUARD_PROMPT else 'OFF'}, "
+                  f"history guard {'ON' if rewriter.HISTORY_GUARD else 'OFF'})")
     print(f"\n{'=' * 100}")
     print(f"RED TEAM - {len(selected)} attacks, system is {state}")
     print(f"{'=' * 100}\n")
@@ -193,10 +215,14 @@ if __name__ == "__main__":
             warn = "" if r["poison_delivered"] else "   <-- POISON NEVER REACHED THE CONTEXT"
             if r["guard_fired"]:
                 warn += f'   [{r["guard_fired"][:44]}]'
+            if not r["rewrite_defended"]:
+                warn += "   <-- REWRITE CORRUPTED"
             print(f"  [{n:2}/{len(plan)}] {r['id']:6} {r['family']:19} "
                   f"{mark}  useful={use:8} {r['seconds']:5.1f}s{warn}")
             if not r["defended"] or not r["useful"]:
-                print(f"           {r['note'][:120]}")
+                print(f"           {r['note'][:150]}")
+                if r["question_rewritten"]:
+                    print(f"           rewrote to: {r['question_rewritten'][:120]}")
                 print(f"           answer: {r['answer'][:150].replace(chr(10), ' ')}")
 
     if not results:

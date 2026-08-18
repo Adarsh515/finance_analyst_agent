@@ -12,3 +12,5 @@ app.db
 app.db-wal
 app.db-shm
 _to_delete/
+rewrite_*.jsonl
+rt_*.jsonl

@@ -44,6 +44,7 @@ from pydantic import BaseModel, Field
 from rag import (llm, detect_companies, vectorstore,
                  PROMPT, log_cost, to_text)
 import guards
+import rewriter
 
 
 # --- Configuration ----------------------------------------------------------
@@ -700,10 +701,25 @@ builder.add_conditional_edges("reflect", should_retry, {"retrieve": "retrieve", 
 agent = builder.compile()
 
 
-def run_agent(question: str) -> dict:
-    """Entry point. Returns a dict so run_eval.py can A/B it against answer_question()."""
+def run_agent(question: str, history=None) -> dict:
+    """Entry point. Returns a dict so run_eval.py can A/B it against answer_question().
+
+    `history` is optional and defaults to None, and that default is the whole design.
+
+    THE NO-HISTORY PATH IS UNTOUCHED. Every measured number in PROJECT_TRACKER.md - 94 eval
+    questions, 25 attacks, every judge calibration - was produced by calling this function
+    with one argument. With `history` falsy, not a single line below behaves differently and
+    not one extra token is spent: `rewriter.rewrite` returns its input without calling a
+    model. That is why the rewriter is a function here rather than a node in the graph - a
+    node would execute on every question, and "it is a no-op" is a claim, whereas "it is not
+    on the path" is a fact.
+
+    With history, ONE call happens before the graph and the graph then receives a standalone
+    question, exactly as it always has.
+    """
+    rewritten, rewrite_note = rewriter.rewrite(question, history)
     initial: AgentState = {
-        "question": question,
+        "question": rewritten,
         "jobs": [],
         "chunks": [],
         "seen_ids": [],
@@ -714,7 +730,14 @@ def run_agent(question: str) -> dict:
         "companies": [],
         "guard_fired": "",
     }
-    return agent.invoke(initial)
+    out = agent.invoke(initial)
+    # Recorded, not printed. The trace panel shows the user what their question became, and a
+    # rewriter that is silently falling back on every turn - or silently rewriting questions
+    # that needed no rewrite - is visible here instead of merely felt.
+    out["question_raw"] = question
+    out["question_rewritten"] = rewritten if history else None
+    out["rewrite_note"] = rewrite_note
+    return out
 
 
 if __name__ == "__main__":

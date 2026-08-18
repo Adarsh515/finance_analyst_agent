@@ -137,7 +137,12 @@ if args.agent:
     agent.GUARDS = not args.no_guards
     answer_fn = agent.run_agent
     PATH_NAME = "AGENT (LangGraph: plan -> retrieve -> answer)"
-    _patched = telemetry.install(judges, rag, agent, judges_rubric, judges_scope)
+    import rewriter
+    # rewriter did `from judges import log_cost` through rag, so it holds its OWN binding.
+    # Leaving it out would drop every rewrite call from the token count - the exact silent
+    # undercount this install() was written to prevent, reappearing the moment a new module
+    # joins the paid path.
+    _patched = telemetry.install(judges, rag, agent, rewriter, judges_rubric, judges_scope)
 else:
     import rag as _rag_mod
     answer_fn = _rag_mod.answer_question
