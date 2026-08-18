@@ -109,18 +109,61 @@ parser.add_argument("--workers", type=int, default=6,
                     help="concurrent questions (1 = serial)")
 parser.add_argument("--out", default="",
                     help="append each scored result to this JSONL file as it completes")
+parser.add_argument("--append", action="store_true",
+                    help="allow --out to append to a file that already has "
+                         "records. Off by default: a duplicated gate run is the\n"
+                         "most expensive mistake available in this repo.")
+parser.add_argument("--repeat", type=int, default=1,
+                    help="run each selected question N times. Generation is not "
+                         "deterministic (lesson 64), so a format or verdict question "
+                         "answered at n=1 measures the generator, not the change.")
+parser.add_argument("--rubric", action="store_true",
+                    help="also run the rubric correctness judge. OFF by default since 4.5.7: "
+                         "it was killed on evidence (24 false positives on 94 real answers, "
+                         "zero catches) and a parked metric should not be billed for on "
+                         "every run. Kept switchable because the code and the finding stay.")
+parser.add_argument("--no-guards", action="store_true",
+                    help="run the agent with the Phase 5/6 guards OFF. Added when the w02 "
+                         "gate failure needed attributing: a quality change that appears "
+                         "the same day a guard ships is not proof the guard caused it, and "
+                         "a flag is cheaper than an argument.")
 parser.add_argument("--no-extra", action="store_true",
                     help="skip the two Phase 4.5 scoreboards (rubric correctness, scope "
                          "groundedness) and score exactly as before 4.5. They are ON by "
                          "default deliberately: a scoreboard you have to remember to "
                          "switch on is a scoreboard that will be missing from the run that "
                          "mattered.")
+
+
+# --- refuse to append to an existing --out file ------------------------------
+# This exists because a duplicate cost real money. eval_60_gate.jsonl came back with 188
+# records - TWO complete 94-question gates, byte-identical answers - and that single
+# duplication was roughly Rs 45 of the Rs 62 spent that day, on a learner's metered credit.
+#
+# --out appends by design (a run that dies at question 79 must keep its first 78 paid
+# answers). But "append" and "the file already holds a finished run" are different
+# situations, and only one of them is safe. So: refuse, name the file, and make the user
+# choose - a new name, or --append if mixing runs is genuinely intended.
+def _guard_out_path(path, append):
+    if not path or append:
+        return
+    import os
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        n = sum(1 for _ in open(path, encoding="utf-8"))
+        raise SystemExit(
+            f"\nREFUSING TO RUN: {path} already holds {n} records.\n"
+            f"Appending would mix two runs in one file and pay for answers you already have.\n"
+            f"Use a new --out name, or pass --append if you really mean to add to it.\n")
+
+
 args = parser.parse_args()
+_guard_out_path(args.out, args.append)
 EXTRA = not args.no_extra
 
 if args.agent:
     import agent
     agent.VERBOSE = False              # silence node logs during a full eval run
+    agent.GUARDS = not args.no_guards
     answer_fn = agent.run_agent
     PATH_NAME = "AGENT (LangGraph: plan -> retrieve -> answer)"
     _patched = _install_cost_tracking(judges, rag, agent, judges_rubric, judges_scope)
@@ -188,9 +231,10 @@ def score_one(ex):
     # measured is what ANDing costs in false negatives on real answers at full scale; eight
     # stored answers is not a sample. That is exactly what this run is for.
     rub = sc = None
-    if EXTRA:
+    if EXTRA and args.rubric:
         rub = rubric_judge(question=ex["question"], prediction=ans,
                            reference=ex["reference_answer"])
+    if EXTRA:
         sc = scope_judge(question=ex["question"], prediction=ans, context=out["context"])
     judge_calls, _calls.sink = _calls.sink, None
 
@@ -215,6 +259,11 @@ def score_one(ex):
 
 def run_set(name, examples, bucket_fn=None):
     examples = [e for e in examples if not ONLY_IDS or e["id"] in ONLY_IDS]
+    if args.repeat > 1:
+        # Repeat by duplicating the work list. The scoreboard totals then read n*len, which
+        # is correct - each repetition is an independent measurement, not a re-scoring of
+        # the same answer.
+        examples = [e for e in examples for _ in range(args.repeat)]
     if not examples:
         return []
 
@@ -288,13 +337,15 @@ def run_set(name, examples, bucket_fn=None):
               f"comparable with every number in the tracker")
         print(f"  Groundedness: {grnd}/{n} = {grnd/n:.0%}   <- likewise")
 
-        if results[0]["rub"] is not None:
-            rubr = sum(r["rub"]["score"] for r in results)
+        if results[0]["sc"] is not None:
             scop = sum(r["sc"]["score"] for r in results)
             andd = sum(min(r["g"]["score"], r["sc"]["score"]) for r in results)
             print(f"\n  NEW SCOREBOARDS (Phase 4.5) - reported beside the two above, never "
                   f"averaged with them:")
-            print(f"  Correctness (rubric)     : {rubr}/{n} = {rubr/n:.0%}")
+            if results[0]["rub"] is not None:
+                rubr = sum(r["rub"]["score"] for r in results)
+                print(f"  Correctness (rubric)     : {rubr}/{n} = {rubr/n:.0%}"
+                      f"   (parked metric, --rubric)")
             print(f"  Groundedness (scope only): {scop}/{n} = {scop/n:.0%}")
             print(f"  Groundedness (binary AND scope): {andd}/{n} = {andd/n:.0%}"
                   f"   <- the strict one")
@@ -302,7 +353,8 @@ def run_set(name, examples, bucket_fn=None):
             # The disagreements ARE the measurement. Two judges that always agree tell you
             # nothing; the rows where they part company are where the truth is contested,
             # and every one of them needs reading by hand.
-            cdis = [r for r in results if r["rub"]["score"] != r["c"]["score"]]
+            cdis = ([r for r in results if r["rub"]["score"] != r["c"]["score"]]
+                    if results[0]["rub"] is not None else [])
             gdis = [r for r in results if r["sc"]["score"] != r["g"]["score"]]
             print(f"\n  correctness disagreements (binary vs rubric): {len(cdis)}")
             for r in cdis:

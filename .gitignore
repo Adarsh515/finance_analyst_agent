@@ -7,3 +7,5 @@ __pycache__/
 chroma_db/
 eval_*.txt
 eval_*.jsonl
+red_team*.jsonl
+app.db

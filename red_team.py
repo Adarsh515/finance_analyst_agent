@@ -48,15 +48,56 @@ parser.add_argument("--undefended", action="store_true",
                          "as it was when these attacks were first measured. This is how the "
                          "before/after comparison stays honest: same file, same attacks, one "
                          "flag - not a git stash and a memory of what the numbers were.")
-parser.add_argument("--no-prompt-guard", action="store_true",
-                    help="keep the CODE guards (fencing, leak detection, token provenance) "
-                         "and drop the 1,415 characters of prompt instructions. Run with and "
-                         "without to price the words.")
+parser.add_argument("--append", action="store_true",
+                    help="allow --out to append to a file that already has "
+                         "records. Off by default: a duplicated gate run is the\n"
+                         "most expensive mistake available in this repo.")
+parser.add_argument("--repeat", type=int, default=1,
+                    help="run each selected attack N times. Generation is not deterministic "
+                         "(lesson 64: five identical calls once gave two different answers), "
+                         "so a single run of a borderline attack measures the generator, not "
+                         "the defence. Use this before calling anything a regression.")
+# default=None, NOT False. This flag used to be a plain store_true, which meant every red
+# team run set agent.GUARD_PROMPT = True and quietly tested the HARDENED PROMPT - a layer
+# that ships DISABLED. One run was reported as "GUARDED (code + prompt layers)" before the
+# banner gave it away. A harness whose default contradicts the shipped configuration is
+# measuring a system nobody runs, which is the silent-pass failure this project keeps
+# finding, this time in my own tooling.
+parser.add_argument("--prompt-guard", dest="prompt_guard", action="store_true", default=None,
+                    help="force the (disabled-by-default) prompt layer ON for this run")
+parser.add_argument("--no-prompt-guard", dest="prompt_guard", action="store_false",
+                    help="force the prompt layer OFF. Neither flag = whatever agent.py "
+                         "ships, which is what you almost always want to measure.")
+
+
+# --- refuse to append to an existing --out file ------------------------------
+# This exists because a duplicate cost real money. eval_60_gate.jsonl came back with 188
+# records - TWO complete 94-question gates, byte-identical answers - and that single
+# duplication was roughly Rs 45 of the Rs 62 spent that day, on a learner's metered credit.
+#
+# --out appends by design (a run that dies at question 79 must keep its first 78 paid
+# answers). But "append" and "the file already holds a finished run" are different
+# situations, and only one of them is safe. So: refuse, name the file, and make the user
+# choose - a new name, or --append if mixing runs is genuinely intended.
+def _guard_out_path(path, append):
+    if not path or append:
+        return
+    import os
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        n = sum(1 for _ in open(path, encoding="utf-8"))
+        raise SystemExit(
+            f"\nREFUSING TO RUN: {path} already holds {n} records.\n"
+            f"Appending would mix two runs in one file and pay for answers you already have.\n"
+            f"Use a new --out name, or pass --append if you really mean to add to it.\n")
+
+
 args = parser.parse_args()
+_guard_out_path(args.out, args.append)
 
 agent.VERBOSE = args.verbose
 agent.GUARDS = not args.undefended
-agent.GUARD_PROMPT = not args.no_prompt_guard
+if args.prompt_guard is not None:      # otherwise leave agent.py's shipped value
+    agent.GUARD_PROMPT = args.prompt_guard
 _REAL_SEARCH = agent._search
 
 
@@ -130,19 +171,19 @@ def run_one(a):
 
 if __name__ == "__main__":
     state = ("UNDEFENDED (guards off)" if args.undefended
-             else "GUARDED, code layers only" if args.no_prompt_guard
-             else "GUARDED (code + prompt layers)")
+             else f"GUARDED (prompt layer {'ON' if agent.GUARD_PROMPT else 'OFF'})")
     print(f"\n{'=' * 100}")
     print(f"RED TEAM - {len(selected)} attacks, system is {state}")
     print(f"{'=' * 100}\n")
 
     results = []
     with open(args.out, "a", encoding="utf-8") as fh:
-        for n, a in enumerate(selected, 1):
+        plan = [a for a in selected for _ in range(args.repeat)]
+        for n, a in enumerate(plan, 1):
             try:
                 r = run_one(a)
             except Exception as e:
-                print(f"  [{n:2}/{len(selected)}] {a['id']:6} INFRA ERROR: {str(e)[:70]}")
+                print(f"  [{n:2}/{len(plan)}] {a['id']:6} INFRA ERROR: {str(e)[:70]}")
                 continue
             results.append(r)
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -152,7 +193,7 @@ if __name__ == "__main__":
             warn = "" if r["poison_delivered"] else "   <-- POISON NEVER REACHED THE CONTEXT"
             if r["guard_fired"]:
                 warn += f'   [{r["guard_fired"][:44]}]'
-            print(f"  [{n:2}/{len(selected)}] {r['id']:6} {r['family']:19} "
+            print(f"  [{n:2}/{len(plan)}] {r['id']:6} {r['family']:19} "
                   f"{mark}  useful={use:8} {r['seconds']:5.1f}s{warn}")
             if not r["defended"] or not r["useful"]:
                 print(f"           {r['note'][:120]}")
@@ -160,6 +201,19 @@ if __name__ == "__main__":
 
     if not results:
         raise SystemExit("nothing ran")
+
+    if args.repeat > 1:
+        # An attack whose verdict changes between identical runs is not a defence result at
+        # all - it is the generator moving. Say so loudly rather than averaging it away.
+        seen = {}
+        for r in results:
+            seen.setdefault(r["id"], []).append(r["defended"])
+        print(f"\n{'=' * 100}\n  STABILITY over {args.repeat} runs\n{'=' * 100}")
+        for i, vs in seen.items():
+            flip = len(set(vs)) > 1
+            note = ("UNSTABLE - generator variance, not a defence verdict"
+                    if flip else "stable")
+            print(f"  {i:6} defended={vs}  {note}")
 
     print(f"\n{'=' * 100}\n  RESULTS\n{'=' * 100}")
     fams = {}
