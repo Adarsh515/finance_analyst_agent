@@ -93,9 +93,17 @@ def index_fingerprint(filings, chunk_count=None):
 
 
 # --- what may never be cached ------------------------------------------------------------
-# Two refusals, both narrow, both for a reason that has already happened in this project.
 
-def cacheable(answer, guard_fired):
+_REFUSAL_PREFIXES = ("not stated", "not provided", "not available", "i cannot",
+                     "the filings do not", "not disclosed")
+
+
+def is_refusal(answer):
+    """True if this answer declines to give a figure. One definition, used everywhere."""
+    return (answer or "").strip().lower().startswith(_REFUSAL_PREFIXES)
+
+
+def cacheable(answer, guard_fired, *, degraded="", chunk_count=None):
     """Return (ok, reason_if_not). Decided in code, on the record, per answer."""
     if guard_fired:
         # An answer produced while a guard was firing was produced UNDER ATTACK. Storing it
@@ -105,13 +113,39 @@ def cacheable(answer, guard_fired):
     low = (answer or "").strip().lower()
     if not low:
         return False, "empty answer"
-    if low.startswith(("not stated", "not provided", "not available", "i cannot",
-                       "the filings do not", "not disclosed")):
-        # A refusal is a legitimate answer, and it is also what a transient retrieval failure
-        # looks like. Phase 4.3 lost six paid answers to one "Server disconnected"; caching
-        # the refusal that came out of such a moment would make a blip permanent. Refusals
-        # are cheap to reproduce, so this costs almost nothing and removes the whole class.
-        return False, "refusal - cheap to reproduce, and a blip must not become permanent"
+
+    # ==========================================================================================
+    # REFUSALS ARE CACHED FROM 6.7, AND THIS REVERSES A 6.5 DECISION. Here is what changed.
+    # ==========================================================================================
+    # 6.5 refused to store them, reasoning: "a refusal is also what a transient failure looks
+    # like, and caching one would make a blip permanent." That reasoning had a testable claim
+    # inside it - that refusals are unstable - and it was never tested. It has been now, on
+    # data already paid for: three independent full gate runs, 94 questions each.
+    #
+    #     questions that refused in ANY run   5   (q24, q25, q26, q40, x17)
+    #     ...that refused in ALL THREE        5
+    #     ...with the byte-identical string   5   ("Not stated in the filing.")
+    #     refusal <-> answer flips            0
+    #
+    # And the comparison that gives it teeth: in the run pair where only 33 of 94 answers were
+    # byte-identical - 61 real answers reworded themselves between runs - all five refusals
+    # came back character for character. Refusals are the MOST stable output this system has,
+    # not the least. The 6.5 rule was protecting against the opposite of what happens.
+    #
+    # The blip it feared cannot reach here by the route it imagined either: llm.invoke has no
+    # try/except around it, so a dropped connection RAISES out of /ask as a 500. It does not
+    # come back as a polite refusal that then gets stored.
+    #
+    # WHAT IS STILL REFUSED, because one blip route is real. plan_node catches its own
+    # exception and degrades to a single unfiltered search. That run keeps going, retrieves
+    # worse context, and can refuse for an entirely transient reason - so a degraded run's
+    # refusal is not stored. Nor is a refusal with no evidence behind it: "I looked and it is
+    # not there" is a finding worth keeping, "I had nothing to look at" is an outage.
+    if is_refusal(low):
+        if degraded:
+            return False, f"refusal from a degraded run ({degraded})"
+        if not chunk_count:
+            return False, "refusal with no retrieved context - an outage, not a finding"
     return True, None
 
 
@@ -136,41 +170,62 @@ def get(conn, question, fingerprint):
 
 def put(conn, *, question, fingerprint, answer, context, guard_fired="", jobs=None,
         filings=None, chunk_ids=None, rounds=None, input_tokens=0, output_tokens=0, usd=0.0,
-        user_id=None):
+        user_id=None, retrieval=None, degraded=""):
     """Store one answer, or refuse and say why. Returns (stored, reason_if_not).
 
     Keyword-only, like db.save_trace and for the same reason: this takes several strings in a
     row, and Phase 1 lost a day to a judge whose arguments were swapped by position.
     """
-    ok, why = cacheable(answer, guard_fired)
+    ok, why = cacheable(answer, guard_fired, degraded=degraded,
+                        chunk_count=len(chunk_ids or []))
     if not ok:
         return False, why
     conn.execute(
         "INSERT OR REPLACE INTO answer_cache (key_hash, normalised_question, question, "
         " answer, context, jobs_json, filings_json, chunk_ids_json, rounds, input_tokens, "
-        " output_tokens, usd, fingerprint, created_by, created_at, hits) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+        " output_tokens, usd, fingerprint, created_by, created_at, retrieval_json, "
+        " is_refusal, hits) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
         (key_for(question, fingerprint), normalise(question), question, answer, context,
          json.dumps(jobs) if jobs is not None else None,
          json.dumps(filings) if filings is not None else None,
          json.dumps(chunk_ids) if chunk_ids is not None else None,
          rounds, int(input_tokens), int(output_tokens), float(usd), fingerprint, user_id,
-         db.utcnow()))
+         db.utcnow(), json.dumps(retrieval) if retrieval is not None else None,
+         int(is_refusal(answer))))
     conn.commit()
     return True, None
 
 
 def stats(conn):
+    """Cache totals. Refusals are counted apart, because they are a different kind of entry.
+
+    An entry that says "not in these filings" still saves a full pipeline run when it is hit,
+    so it belongs in saved_usd. It is NOT an answer, though, and a scoreboard that mixed the
+    two would let a cache full of refusals read as a cache full of knowledge.
+    """
     row = conn.execute(
         "SELECT COUNT(*) AS entries, COALESCE(SUM(hits),0) AS hits, "
         "COALESCE(SUM(hits * usd),0.0) AS saved_usd, "
-        "COALESCE(SUM(hits * input_tokens),0) AS saved_input_tokens FROM answer_cache"
-    ).fetchone()
+        "COALESCE(SUM(hits * input_tokens),0) AS saved_input_tokens, "
+        "COALESCE(SUM(is_refusal),0) AS refusal_entries, "
+        "COALESCE(SUM(CASE WHEN is_refusal = 1 THEN hits ELSE 0 END),0) AS refusal_hits "
+        "FROM answer_cache").fetchone()
     return dict(row)
 
 
-def clear(conn):
-    conn.execute("DELETE FROM answer_cache")
+def clear(conn, refusals_only=False):
+    """Empty the cache, or only its refusals.
+
+    refusals_only exists for one specific event: the corpus grows to cover a company that was
+    previously absent. Every stored "not in these filings" for that company is now WRONG, and
+    the fingerprint in the key already handles it - a rebuilt index makes the old rows
+    unreachable. This is the manual escape hatch for the case where the index did not change
+    but the judgement did, and it is here so that the answer to "what if a cached refusal goes
+    stale?" is one command rather than a shrug.
+    """
+    conn.execute("DELETE FROM answer_cache WHERE is_refusal = 1" if refusals_only
+                 else "DELETE FROM answer_cache")
     conn.commit()
 
 
@@ -221,15 +276,63 @@ if __name__ == "__main__":
     assert not stored and "under attack" in why, why
     ok += 1
 
-    # nor a refusal, nor an empty answer
-    for ans in ("Not stated in the filing.", "   ", "The filings do not disclose this."):
-        stored, why = put(c, question=f"q-{ans[:6]}", fingerprint=FP, answer=ans, context="c")
-        assert not stored, (ans, why)
+    # nor an empty answer
+    stored, why = put(c, question="q-empty", fingerprint=FP, answer="   ", context="c")
+    assert not stored and why == "empty answer", why
+    ok += 1
+
+    # --- refusals: stored from 6.7, but only from a healthy run ------------------------------
+    # A refusal with real evidence behind it is a FINDING - "I read these filings and the
+    # figure is not in them" - and it is the most reproducible output this system has (three
+    # gate runs, five refusals, byte-identical every time). It is stored, and marked.
+    tesla = "What was Tesla's total revenue for fiscal year 2025?"
+    stored, why = put(c, question=tesla, fingerprint=FP, answer="Not stated in the filing.",
+                      context="ctx", chunk_ids=["a", "b", "c"], rounds=1,
+                      input_tokens=3900, output_tokens=8, usd=0.00061, user_id=1)
+    assert stored, why
+    row = get(c, tesla, FP)
+    assert row["answer"] == "Not stated in the filing." and row["is_refusal"] == 1
+    ok += 1
+
+    # ...but a refusal from a run whose planner fell back is a maybe, not a finding
+    stored, why = put(c, question="q-degraded", fingerprint=FP, answer="Not stated in the filing.",
+                      context="ctx", chunk_ids=["a"], degraded="planner-fallback")
+    assert not stored and "degraded" in why, why
+    # ...and a refusal with nothing retrieved is an outage wearing a refusal's clothes
+    stored, why = put(c, question="q-nochunks", fingerprint=FP,
+                      answer="Not stated in the filing.", context="", chunk_ids=[])
+    assert not stored and "no retrieved context" in why, why
+    ok += 1
+
+    # a refusal produced under attack is still refused - the attack rule outranks the new one
+    stored, why = put(c, question="q-attacked", fingerprint=FP,
+                      answer="Not stated in the filing.", context="ctx", chunk_ids=["a"],
+                      guard_fired="refusal-with-quarantine")
+    assert not stored and "under attack" in why, why
     ok += 1
 
     s = stats(c)
-    assert s["entries"] == 1 and s["hits"] >= 1, s
-    assert abs(s["saved_usd"] - 0.00058 * s["hits"]) < 1e-12
+    assert s["entries"] == 2, s                       # the real answer and the Tesla refusal
+    assert s["refusal_entries"] == 1, s
+    assert s["hits"] >= 2, s
+    # saved_usd must count BOTH kinds: a hit on a refusal skips a full pipeline run too.
+    # hits are read with a plain SELECT, never with get() - get() RECORDS a hit, so using it
+    # to measure hits would change the number it is being used to check.
+    def hits_of(q):
+        r = c.execute("SELECT hits FROM answer_cache WHERE key_hash = ?",
+                      (key_for(q, FP),)).fetchone()
+        return r["hits"] if r else 0
+    expect = 0.00058 * hits_of(base) + 0.00061 * hits_of(tesla)
+    assert abs(s["saved_usd"] - expect) < 1e-12, (s["saved_usd"], expect)
+    ok += 1
+
+    # purging only the refusals must leave the real answers alone - the escape hatch for
+    # "the corpus grew and now covers a company we used to decline"
+    clear(c, refusals_only=True)
+    s = stats(c)
+    assert s["entries"] == 1 and s["refusal_entries"] == 0, s
+    assert get(c, tesla, FP) is None, "a purged refusal was still served"
+    assert get(c, base, FP) is not None, "purging refusals took a real answer with it"
     ok += 1
 
     clear(c)

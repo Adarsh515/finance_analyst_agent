@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<!--
+  ui.html - Phase 6.6. The real interface, served by app.py at "/".
+
+  This REPLACES ui_mockup.html, which was drawn in 6.3 before accounts, history and the
+  trace panel were agreed. The mockup had one screen and hardcoded numbers; this has two
+  screens, a conversation list, real follow-ups and a panel that reads only what the
+  database stored.
+
+  Single file, no framework, no build step, no CDN. That is a deliberate choice for a repo
+  an instructor has to run: `uvicorn app:app` and open a browser, nothing else. It also
+  means there is no bundler between what is written here and what the browser executes.
+
+  TWO RULES THIS FILE FOLLOWS, both carried from the backend:
+
+  1. NOTHING IS RECOMPUTED HERE. Every figure in the trace panel is a field from the
+     `traces` / `trace_calls` rows. The panel adds nothing up. If it did, the product and
+     the eval could disagree while both looked self-consistent - the exact drift the 6.1
+     contract exists to prevent.
+  2. THE ANSWER APPEARS ALL AT ONCE, and that is not laziness. guards.scrub needs the
+     whole answer: leak detection is an 8-gram test over finished text. You cannot stream
+     an answer you have not finished checking. The pipeline strip below is what replaces
+     the typewriter effect, and it is more honest - it shows what the system actually did.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Financial Research &amp; Compliance Analyst</title>
+<style>
+  :root{
+    --bg:#F7F8FA; --surface:#FFFFFF; --border:#E4E7EC; --border-strong:#D0D5DD;
+    --ink:#101828; --ink-2:#475467; --ink-3:#98A2B3;
+    --accent:#12395F; --accent-soft:#EAF0F6;
+    --ok:#067647; --ok-soft:#ECFDF3;
+    --warn:#B54708; --warn-soft:#FFFAEB;
+    --stop:#B42318; --stop-soft:#FEF3F2;
+    --radius:8px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* Financial figures must line up. This one declaration is most of what makes a
+     numbers-heavy page look professional rather than homemade. */
+  .num,table td,.stat b,.calls td{font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+  button{font:inherit}
+  a{color:var(--accent)}
+
+  /* ---------- auth screen ---------------------------------------------- */
+  #auth{min-height:100%; display:grid; place-items:center; padding:24px}
+  .authcard{width:100%; max-width:400px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--radius); padding:28px}
+  .authcard h1{font-size:19px; margin:0 0 4px; letter-spacing:-.01em}
+  .authcard p.sub{color:var(--ink-3); font-size:13px; margin:0 0 22px}
+  label{display:block; font-size:13px; color:var(--ink-2); margin:14px 0 5px}
+  input[type=email],input[type=password],input[type=text]{
+    width:100%; border:1px solid var(--border-strong); border-radius:6px; padding:10px 12px;
+    font:inherit; color:var(--ink); background:#fff;
+  }
+  input:focus,textarea:focus{outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent)}
+  button.primary{background:var(--accent); color:#fff; border:0; border-radius:6px;
+    padding:11px 18px; font-weight:550; cursor:pointer}
+  button.primary:hover{background:#0D2C4A}
+  button.primary[disabled]{background:var(--ink-3); cursor:default}
+  button.link{background:none; border:0; color:var(--accent); cursor:pointer; padding:0;
+    text-decoration:underline; font-size:13px}
+  .authcard .primary{width:100%; margin-top:20px}
+  .authcard .swap{margin-top:16px; font-size:13px; color:var(--ink-2); text-align:center}
+  .err{margin-top:14px; padding:9px 12px; border-radius:6px; font-size:13px;
+    background:var(--stop-soft); color:var(--stop); border:1px solid #FECDCA}
+  .policy{margin-top:8px; font-size:12px; color:var(--ink-3)}
+
+  /* ---------- app shell -------------------------------------------------- */
+  #app{display:none; height:100%; grid-template-columns:264px 1fr}
+  aside{background:var(--surface); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; min-height:0}
+  .brand{padding:16px; border-bottom:1px solid var(--border)}
+  .brand b{display:block; font-weight:650; letter-spacing:-.01em; font-size:15px}
+  .brand span{font-size:12px; color:var(--ink-3)}
+  .newchat{margin:12px; padding:9px; border:1px solid var(--border-strong); background:#fff;
+    border-radius:6px; cursor:pointer; color:var(--ink); font-size:14px}
+  .newchat:hover{background:var(--bg)}
+  .convs{flex:1; overflow:auto; padding:0 8px 8px}
+  .conv{padding:9px 10px; border-radius:6px; cursor:pointer; font-size:14px; color:var(--ink-2);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .conv:hover{background:var(--bg)}
+  .conv.on{background:var(--accent-soft); color:var(--accent); font-weight:550}
+  .whoami{border-top:1px solid var(--border); padding:12px 16px; font-size:13px; color:var(--ink-2)}
+  .whoami .row{display:flex; justify-content:space-between; gap:8px}
+  .whoami b{color:var(--ink); font-weight:550}
+
+  main{display:flex; flex-direction:column; min-height:0}
+  .thread{flex:1; overflow:auto; padding:28px 0}
+  .wrap{max-width:820px; margin:0 auto; padding:0 24px}
+  .empty{color:var(--ink-3); text-align:center; padding:64px 0}
+  .empty h2{color:var(--ink-2); font-weight:550; font-size:16px; margin:0 0 6px}
+
+  /* Conversation layout: the person on the right, the system on the left. The asymmetry is
+     doing real work here - in a tool whose whole point is that answers are sourced, it must
+     never be ambiguous which side of the page a claim came from. */
+  .msg{margin-bottom:18px; display:flex; flex-direction:column; align-items:flex-start}
+  .msg.user{align-items:flex-end}
+  .who{font-size:11px; color:var(--ink-3); text-transform:uppercase; letter-spacing:.04em;
+    margin-bottom:4px}
+  .bubble{background:var(--surface); border:1px solid var(--border);
+    border-radius:14px 14px 14px 4px; padding:13px 16px; white-space:pre-wrap;
+    max-width:min(88%,660px)}
+  .msg.user .bubble{background:var(--accent-soft); border-color:#D6E1EC;
+    border-radius:14px 14px 4px 14px}
+  .stamp{font-size:11px; color:var(--ink-3); margin-top:4px}
+  .msg.assistant details.trace{max-width:min(88%,660px); align-self:flex-start}
+
+  .badges{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px}
+  .badges:empty{display:none}          /* no empty gap above answers that earned no badge */
+  .tag{font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--border);
+    color:var(--ink-2); background:var(--bg)}
+  .tag.ok{background:var(--ok-soft); color:var(--ok); border-color:#ABEFC6}
+  .tag.warn{background:var(--warn-soft); color:var(--warn); border-color:#FEDF89}
+  .tag.stop{background:var(--stop-soft); color:var(--stop); border-color:#FECDCA}
+
+  details.trace{margin-top:10px; border:1px solid var(--border); border-radius:var(--radius);
+    background:var(--surface)}
+  details.trace>summary{cursor:pointer; padding:10px 14px; font-size:13px; color:var(--ink-2);
+    list-style:none}
+  details.trace>summary::-webkit-details-marker{display:none}
+  details.trace>summary:before{content:"▸ "; color:var(--ink-3)}
+  details.trace[open]>summary:before{content:"▾ "}
+  .tracebody{padding:4px 14px 16px; border-top:1px solid var(--border); font-size:13px}
+  .sec{margin-top:14px}
+  .sec h4{margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--ink-3); font-weight:600}
+  .pipe{display:flex; flex-wrap:wrap; gap:6px; align-items:center}
+  .step{font-size:12px; padding:3px 9px; border-radius:6px; border:1px solid var(--border);
+    background:var(--bg); color:var(--ink-3)}
+  .step.on{background:var(--accent-soft); border-color:#D6E1EC; color:var(--accent); font-weight:550}
+  .step.skip{text-decoration:line-through}
+  .arrow{color:var(--ink-3); font-size:12px}
+  ul.plain{margin:0; padding-left:18px; color:var(--ink-2)}
+  ul.plain li{margin:2px 0}
+  code{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; color:var(--ink-2);
+    background:var(--bg); padding:1px 5px; border-radius:4px}
+  table.calls{width:100%; border-collapse:collapse; margin-top:4px}
+  table.calls th{text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+    color:var(--ink-3); font-weight:600; padding:4px 8px 4px 0; border-bottom:1px solid var(--border)}
+  table.calls td{padding:5px 8px 5px 0; border-bottom:1px solid var(--border); color:var(--ink-2)}
+  table.calls td.r,table.calls th.r{text-align:right}
+  table.calls tr.total td{font-weight:600; color:var(--ink); border-bottom:0}
+  /* the saving is shown in the same table as the spend, one row below it, so the two numbers
+     are read together. Green, because it is the only figure in the panel that is good news. */
+  table.calls tr.saved td{color:var(--ok, #1a7f4b); border-bottom:0; font-weight:600}
+  .note{margin-top:10px; font-size:12px; color:var(--ink-3)}
+
+  /* Nearest-neighbour selection. A bar per candidate, in the order the store returned them
+     for THAT job. The bar length is a within-job comparison and nothing else - see the
+     caption printed under it. */
+  .nnjob{margin:10px 0 14px}
+  .nnq{font-size:12px; color:var(--ink-2); margin-bottom:6px}
+  .nnq b{color:var(--ink); font-weight:600}
+  .nnrow{display:grid; grid-template-columns:22px 1fr 62px; gap:8px; align-items:center;
+    margin:3px 0}
+  .nnrank{font-size:11px; color:var(--ink-3); text-align:right}
+  .nnbar{position:relative; height:22px; background:var(--bg); border:1px solid var(--border);
+    border-radius:4px; overflow:hidden}
+  .nnfill{position:absolute; inset:0 auto 0 0; background:#E7EEF5}
+  .nnrow.kept .nnfill{background:#CFE0EE}
+  .nntext{position:relative; padding:3px 7px; font-size:11px; color:var(--ink-2);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .nnrow.drop .nntext{color:var(--ink-3)}
+  .nnscore{font-size:11px; color:var(--ink-3); text-align:right}
+  .nnrow.kept .nnscore{color:var(--accent); font-weight:600}
+  .dl{background:none; border:1px solid var(--border-strong); border-radius:6px;
+    padding:5px 10px; font-size:12px; color:var(--ink-2); cursor:pointer}
+  .dl:hover{background:var(--bg)}
+  .threadhead{max-width:820px; margin:0 auto 14px; padding:0 24px; display:flex;
+    justify-content:flex-end; gap:8px}
+
+  .composer{border-top:1px solid var(--border); background:var(--surface); padding:14px 0}
+  .composer .wrap{display:flex; gap:10px; align-items:flex-start}
+  .composer textarea{flex:1; border:1px solid var(--border-strong); border-radius:6px;
+    padding:10px 12px; font:inherit; resize:vertical; min-height:48px; max-height:200px}
+  .composer .hint{max-width:820px; margin:8px auto 0; padding:0 24px; font-size:12px; color:var(--ink-3)}
+  .spinner{display:inline-block; width:12px; height:12px; border:2px solid #ffffff66;
+    border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-1px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (max-width:820px){ #app{grid-template-columns:1fr} aside{display:none} }
+</style>
+</head>
+<body>
+
+<!-- ============================ AUTH ============================ -->
+<section id="auth">
+  <div class="authcard">
+    <h1>Financial Research &amp; Compliance Analyst</h1>
+    <p class="sub">Questions answered only from SEC filings in the corpus.</p>
+
+    <form id="authform" autocomplete="on">
+      <label for="email">Email</label>
+      <input id="email" type="email" required autocomplete="username">
+      <label for="password">Password</label>
+      <input id="password" type="password" required autocomplete="current-password">
+      <div class="policy" id="policy" hidden>At least 10 characters. Not a common password,
+        and not your own email address.</div>
+      <button class="primary" id="authbtn" type="submit">Sign in</button>
+    </form>
+    <div class="err" id="autherr" hidden></div>
+    <div class="swap">
+      <span id="swaptext">No account yet?</span>
+      <button class="link" id="swap" type="button">Create one</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ APP ============================= -->
+<div id="app">
+  <aside>
+    <div class="brand">
+      <b>Financial Analyst</b>
+      <span id="corpus">…</span>
+    </div>
+    <button class="newchat" id="newchat">+ New chat</button>
+    <div class="convs" id="convs"></div>
+    <div class="whoami">
+      <div class="row"><span id="who">…</span><button class="link" id="logout">Sign out</button></div>
+      <div class="row" style="margin-top:6px">
+        <span>Your usage</span><b id="spend">—</b>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="thread" id="thread">
+      <div class="threadhead" id="threadhead" hidden>
+        <span style="margin-right:auto;font-size:12px;color:#98A2B3;align-self:center"
+              id="dlnote">Download the conversation — questions and answers only</span>
+        <button class="dl" id="dldocx" type="button">Download .docx</button>
+        <button class="dl" id="dlpdf" type="button">Download .pdf</button>
+      </div>
+      <div class="wrap"><div class="empty" id="empty">
+        <h2>Ask about the filings</h2>
+        <div>Every answer shows its sources, its pipeline and what it cost.</div>
+      </div></div>
+    </div>
+    <div class="composer">
+      <form class="wrap" id="askform">
+        <textarea id="q" placeholder="e.g. What was NVIDIA's total revenue for fiscal year 2026?"
+                  rows="1"></textarea>
+        <button class="primary" id="send" type="submit">Ask</button>
+      </form>
+      <div class="hint" id="hint">Follow-ups work: ask “and AMD?” after a question and the
+        system rewrites it into a standalone question before answering.</div>
+    </div>
+  </main>
+</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * Small helpers. No framework, so escaping is done by hand and done
+ * EVERYWHERE user text or model text reaches the DOM. An answer is
+ * model output built from retrieved documents, and Phase 5 exists
+ * because that text is not automatically friendly - rendering it as
+ * HTML would hand a prompt injection a second, easier target.
+ * ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const money = (u) => "$" + Number(u || 0).toFixed(6);
+const int = (n) => Number(n || 0).toLocaleString();
+
+/* The CSRF cookie is readable on purpose - the double-submit scheme needs the page to echo
+   it back in a header. The SESSION cookie is HttpOnly and is not reachable from here, which
+   is what makes an XSS bug survivable. */
+const csrf = () => (document.cookie.match(/(?:^|;\s*)fa_csrf=([^;]+)/) || [])[1] || "";
+
+async function api(path, opts = {}) {
+  const o = Object.assign({ headers: {} }, opts);
+  if (o.body) { o.headers["Content-Type"] = "application/json"; o.body = JSON.stringify(o.body); }
+  if (o.method && o.method !== "GET") o.headers["X-CSRF-Token"] = decodeURIComponent(csrf());
+  const r = await fetch(path, o);
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = {}; }
+  if (!r.ok) {
+    const err = new Error(data.detail || data.error || ("HTTP " + r.status));
+    err.code = data.error; err.status = r.status;
+    throw err;
+  }
+  return data;
+}
+
+let state = { user: null, convId: null };
+
+/* ------------------------------ auth ------------------------------ */
+let mode = "login";
+$("swap").onclick = () => {
+  mode = mode === "login" ? "signup" : "login";
+  $("authbtn").textContent = mode === "login" ? "Sign in" : "Create account";
+  $("swaptext").textContent = mode === "login" ? "No account yet?" : "Already have an account?";
+  $("swap").textContent = mode === "login" ? "Create one" : "Sign in";
+  $("policy").hidden = mode === "login";
+  $("password").setAttribute("autocomplete", mode === "login" ? "current-password" : "new-password");
+  $("autherr").hidden = true;
+};
+
+$("authform").onsubmit = async (e) => {
+  e.preventDefault();
+  $("autherr").hidden = true;
+  $("authbtn").disabled = true;
+  try {
+    const body = { email: $("email").value, password: $("password").value };
+    const out = await api(mode === "login" ? "/auth/login" : "/auth/signup",
+                          { method: "POST", body });
+    state.user = out.user;
+    await enterApp();
+  } catch (err) {
+    // The server deliberately returns one message for "wrong password" and "no such
+    // account". Showing exactly what it said keeps that property; inventing a friendlier
+    // distinction here would hand back the account-enumeration oracle auth.py removes.
+    $("autherr").textContent = err.message;
+    $("autherr").hidden = false;
+  } finally {
+    $("authbtn").disabled = false;
+  }
+};
+
+$("logout").onclick = async () => {
+  try { await api("/auth/logout", { method: "POST" }); } catch (e) { /* already gone */ }
+  location.reload();
+};
+
+/* ------------------------------ shell ----------------------------- */
+async function enterApp() {
+  $("auth").style.display = "none";
+  $("app").style.display = "grid";
+  $("who").textContent = state.user.display_name || state.user.email;
+  const health = await api("/health");
+  $("corpus").textContent = health.filings + " filings · guards "
+    + (health.guards ? "on" : "OFF") + (health.cache_enabled ? " · cache on" : "");
+  await Promise.all([loadConvs(), refreshSpend()]);
+}
+
+async function refreshSpend() {
+  const me = await api("/auth/me");
+  const s = me.spend;
+  $("spend").textContent = s.questions + " Q · " + money(s.usd);
+  $("spend").title = int(s.input_tokens) + " input tokens, " + int(s.output_tokens) + " output";
+}
+
+async function loadConvs() {
+  const out = await api("/conversations");
+  const box = $("convs");
+  box.innerHTML = "";
+  if (!out.conversations.length) {
+    // An empty sidebar and a broken sidebar looked identical. They should not.
+    box.innerHTML = '<div style="padding:10px;font-size:13px;color:#98A2B3">'
+      + "No conversations yet.</div>";
+    return;
+  }
+  out.conversations.forEach((c) => {
+    const d = document.createElement("div");
+    d.className = "conv" + (c.id === state.convId ? " on" : "");
+    d.textContent = c.title;
+    d.title = c.title;
+    d.onclick = () => openConv(c.id);
+    box.appendChild(d);
+  });
+}
+
+$("newchat").onclick = () => {
+  state.convId = null;
+  $("thread").querySelector(".wrap").innerHTML =
+    '<div class="empty"><h2>Ask about the filings</h2>'
+    + '<div>Every answer shows its sources, its pipeline and what it cost.</div></div>';
+  $("threadhead").hidden = true;
+  loadConvs();
+  $("q").focus();
+};
+
+async function openConv(id) {
+  state.convId = id;
+  const out = await api("/conversations/" + id);
+  const box = $("thread").querySelector(".wrap");
+  box.innerHTML = "";
+  out.messages.forEach((m) => box.appendChild(
+      renderMsg(m.role, m.content, m.id, m.created_at,
+                m.role === "assistant" ? m : null)));
+  $("threadhead").hidden = false;
+  loadConvs();
+  $("thread").scrollTop = $("thread").scrollHeight;
+}
+
+/* ---------------------------- rendering --------------------------- */
+function stamp(iso) {
+  // Stored as ISO-8601 UTC with a trailing Z; shown in the reader's own timezone, because a
+  // timestamp the reader has to convert in their head is decoration rather than information.
+  if (!iso) return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const d = new Date(iso);
+  const today = new Date().toDateString() === d.toDateString();
+  const t = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return today ? t : d.toLocaleDateString([], { day: "numeric", month: "short" }) + " " + t;
+}
+
+function renderMsg(role, content, messageId, createdAt, summary) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  /* `summary` is the handful of trace columns list_messages joins in, or the /ask response on
+     the live path. Both carry the same field names, so the badges cannot say one thing when
+     an answer arrives and a different thing when it is read back tomorrow. */
+  el.innerHTML = '<div class="who">' + (role === "user" ? "You" : "Analyst") + "</div>"
+    + '<div class="bubble">' + esc(content) + "</div>"
+    + (summary ? '<div class="badges">' + badges(summary) + "</div>" : "")
+    + '<div class="stamp">' + esc(stamp(createdAt)) + "</div>";
+  if (role === "assistant" && messageId) {
+    const d = document.createElement("details");
+    d.className = "trace";
+    d.innerHTML = "<summary>How this answer was produced — sources, pipeline and cost</summary>"
+      + '<div class="tracebody">loading…</div>';
+    // Fetched on expand, not up front: a conversation with forty answers would otherwise
+    // make forty requests nobody asked for.
+    d.addEventListener("toggle", async () => {
+      if (!d.open || d.dataset.loaded) return;
+      d.dataset.loaded = "1";
+      try {
+        const t = await api("/messages/" + messageId + "/trace");
+        d.querySelector(".tracebody").innerHTML = traceHTML(t);
+      } catch (err) {
+        d.querySelector(".tracebody").textContent = "No trace stored for this message.";
+      }
+    });
+    el.appendChild(d);
+  }
+  return el;
+}
+
+function badges(t) {
+  const out = [];
+  if (t.cache_hit) {
+    /* This badge used to read `served from cache · $0.000000`, hard-coded, and that was a
+       FALSE STATEMENT on every follow-up. The lookup happens AFTER the rewriter runs, so a
+       cached follow-up has already paid for one model call - app.py records those calls
+       correctly and only this line was lying about them. What is printed now is the stored
+       trace total, whatever it happens to be, plus what the first run of this question
+       actually cost so the saving is evidence rather than a claim. */
+    out.push('<span class="tag ok">served from cache · '
+      + (t.usd > 0 ? "you paid " + money(t.usd) : "free")
+      + (t.saved_usd > 0 ? " · saved " + money(t.saved_usd) : "") + "</span>");
+  }
+  if (t.guard_fired) out.push('<span class="tag warn">guard fired</span>');
+  if (t.reflect_fired) out.push('<span class="tag">second retrieval round</span>');
+  if (t.question_rewritten) out.push('<span class="tag">follow-up rewritten</span>');
+  return out.join("");
+}
+
+/* EVERY value below is a stored field. Nothing is summed, averaged or derived here - the
+   totals row prints traces.input_tokens / output_tokens / usd, which save_trace computed
+   from the very call rows shown above it. See the 6.1 contract. */
+function traceHTML(t) {
+  const steps = [
+    ["rewrite", !!t.question_rewritten],
+    ["plan", !t.cache_hit],
+    ["retrieve", !t.cache_hit],
+    ["answer", !t.cache_hit],
+    ["reflect", !!t.reflect_fired],
+    ["guards", true],
+    ["cache", true],
+  ];
+  let h = "";
+
+  h += '<div class="sec"><h4>Pipeline</h4><div class="pipe">'
+    + steps.map(([n, on], i) =>
+        '<span class="step ' + (on ? "on" : "skip") + '">' + n + "</span>"
+        + (i < steps.length - 1 ? '<span class="arrow">→</span>' : ""))
+        .join("")
+    + "</div>";
+  if (t.cache_hit) {
+    /* "so no model was called" was the same lie as the badge. On a follow-up the rewriter
+       ran and was paid for; only the plan/retrieve/answer stages were skipped. */
+    h += '<div class="note">Served from the cache: '
+       + ((t.calls && t.calls.length)
+            ? "the follow-up still had to be rewritten into a standalone question, which cost "
+              + "one model call. Planning, retrieval and generation were all skipped."
+            : "no model was called at all.")
+       + " The sources below are the ones recorded when this answer was first produced.</div>";
+  }
+  h += "</div>";
+
+  if (t.question_rewritten) {
+    h += '<div class="sec"><h4>Question sent to the pipeline</h4>'
+      + "<div>" + esc(t.question_rewritten) + "</div>"
+      + '<div class="note">You asked: “' + esc(t.question_raw) + "”</div></div>";
+  }
+
+  if (t.filings && t.filings.length) {
+    h += '<div class="sec"><h4>Filings the answer was read from</h4><ul class="plain">'
+      + t.filings.map((f) => "<li>" + esc(f) + "</li>").join("") + "</ul>"
+      + '<div class="note">These are the filings present in the retrieved context — not a '
+      + 'claim that every one of them supports every figure above.</div></div>';
+  }
+
+  // --- nearest-neighbour selection ---------------------------------------------------------
+  // WHAT THE BARS MEAN, and it is narrower than it looks. Chroma returns a DISTANCE: smaller
+  // is closer. The bar is that distance rescaled WITHIN ONE JOB, so the longest bar is the
+  // nearest neighbour for that query and nothing more. Bars are not comparable between jobs
+  // and a bar is not a quality score - lesson 56 in this project measured unrelated text
+  // scoring 0.70-0.80 in this same space, and lesson 120 found two questions with OPPOSITE
+  // answers at 0.9960. The raw distance is printed beside each bar so nothing is hidden
+  // behind the drawing.
+  if (t.retrieval && t.retrieval.length) {
+    h += '<div class="sec"><h4>Nearest-neighbour selection</h4>';
+    t.retrieval.forEach((job) => {
+      const cands = job.candidates || [];
+      const scores = cands.map((c) => c.score).filter((x) => typeof x === "number");
+      const lo = Math.min.apply(null, scores), hi = Math.max.apply(null, scores);
+      const span = (hi - lo) || 1;
+      const where = [job.company, job.period].filter(Boolean).join(" · ");
+      h += '<div class="nnjob"><div class="nnq">round ' + esc(job.round) + " · "
+        + (where ? "<b>" + esc(where) + "</b> — " : "") + esc(job.query) + "</div>";
+      cands.forEach((c) => {
+        // distance -> nearness, rescaled inside this job only
+        const pct = typeof c.score === "number"
+          ? Math.round(100 * (1 - (c.score - lo) / span) * 0.92) + 8 : 50;
+        const cls = c.kept ? "kept" : "drop";
+        const label = [c.company, c.period, c.type].filter(Boolean).join(" · ");
+        h += '<div class="nnrow ' + cls + '">'
+          + '<div class="nnrank">' + esc(c.rank) + "</div>"
+          + '<div class="nnbar"><div class="nnfill" style="width:' + pct + '%"></div>'
+          + '<div class="nntext">' + (c.kept ? "✓ " : "") + esc(label || c.id)
+          + " — " + esc(c.preview) + "</div></div>"
+          + '<div class="nnscore">' + (typeof c.score === "number" ? c.score.toFixed(4) : "—")
+          + "</div></div>";
+      });
+      const keptN = cands.filter((c) => c.kept).length;
+      h += '<div class="note">' + keptN + " of " + cands.length
+        + " kept — selection is round-robin across jobs, so a lower-ranked candidate from "
+        + "one job can be kept while a higher-ranked one from another is not.</div></div>";
+    });
+    h += '<div class="note">Bars are rescaled <b>within each job</b>. A distance means '
+      + "nothing on its own — only the ordering under one query does.</div></div>";
+  }
+
+  if (t.chunk_ids && t.chunk_ids.length) {
+    h += '<div class="sec"><h4>Source passages (' + t.chunk_ids.length + ")</h4><div>"
+      + t.chunk_ids.map((c) => "<code>" + esc(c) + "</code>").join(" ") + "</div></div>";
+  }
+
+  if (t.jobs && t.jobs.length) {
+    h += '<div class="sec"><h4>Searches the planner ran</h4><ul class="plain">'
+      + t.jobs.map((j) => "<li>" + esc([j.company, j.period].filter(Boolean).join(" · "))
+          + (j.company || j.period ? " — " : "") + esc(j.query) + "</li>").join("")
+      + "</ul></div>";
+  }
+
+  if (t.guard_fired) {
+    h += '<div class="sec"><h4>Guardrail</h4><div>' + esc(t.guard_fired) + "</div>"
+      + '<div class="note">A guard rewrote or regenerated this answer. The reason is stored '
+      + 'with it so a defence can be attributed to the layer that produced it.</div></div>';
+  }
+
+  const calls = t.calls || [];
+  h += '<div class="sec"><h4>Model calls, tokens and cost</h4>';
+  /* The table is built unconditionally. It used to be opened only inside the `else`, while
+     the Total row was emitted outside it - so on a free cache hit the browser dropped a
+     stray <tr> and the panel showed no total at all. The one case that most needs a visible
+     "0" was the one case that printed nothing. */
+  h += '<table class="calls"><thead><tr><th>Step</th><th>Model</th>'
+    + '<th class="r">Input</th><th class="r">Output</th><th class="r">Cost</th>'
+    + "</tr></thead><tbody>";
+  if (!calls.length) {
+    h += '<tr><td colspan="5" class="note">No model was called for this answer.</td></tr>';
+  } else {
+    h += calls.map((c) => "<tr><td>" + esc(c.label) + "</td><td>" + esc(c.model) + "</td>"
+          + '<td class="r">' + int(c.input_tokens) + "</td>"
+          + '<td class="r">' + int(c.output_tokens) + "</td>"
+          + '<td class="r">' + money(c.usd) + "</td></tr>").join("");
+  }
+  h += '<tr class="total"><td colspan="2">You paid</td>'
+    + '<td class="r">' + int(t.input_tokens) + "</td>"
+    + '<td class="r">' + int(t.output_tokens) + "</td>"
+    + '<td class="r">' + money(t.usd) + "</td></tr>";
+  /* saved_* is only ever non-zero on a cache hit, and it is a STORED figure - what the first
+     run of this exact question actually paid - not an average, an estimate or a list price. */
+  if (t.cache_hit && t.saved_usd > 0) {
+    h += '<tr class="saved"><td colspan="2">Avoided by the cache</td>'
+      + '<td class="r">' + int(t.saved_input_tokens) + "</td>"
+      + '<td class="r">' + int(t.saved_output_tokens) + "</td>"
+      + '<td class="r">' + money(t.saved_usd) + "</td></tr>";
+  }
+  h += "</tbody></table>";
+  if (t.cache_hit && t.saved_usd > 0) {
+    h += '<div class="note">“Avoided” is what this exact question cost the first time it was '
+      + "asked, recorded then and stored with the answer. It is not an estimate of what a "
+      + "model would charge today.</div>";
+  }
+  h += '<div class="note">' + (t.seconds != null ? t.seconds + " s · " : "")
+    + "retrieval rounds: " + (t.rounds != null ? t.rounds : "—") + "</div></div>";
+
+  h += '<div class="sec"><h4>Stack</h4><div class="note">'
+    + "LangGraph agent (plan → retrieve → answer → reflect) over a Chroma index of parsed "
+    + "SEC filings, Gemini for planning and generation, guardrails in code, FastAPI + SQLite "
+    + "for serving. Buffered, not streamed: the output guards need the whole answer before "
+    + "any of it can be shown.</div></div>";
+  return h;
+}
+
+/* --------------------------- download ------------------------------ */
+/* The export contains the CONVERSATION ONLY - questions, answers, timestamps. No sources,
+   no pipeline, no tokens, no cost. That was asked for and it is also the right default: the
+   trace panel is an engineering artefact, and a document that mixed it into the transcript
+   would be neither a clean record of the conversation nor a usable audit trail. */
+function download(fmt) {
+  if (!state.convId) return;
+  window.location = "/conversations/" + state.convId + "/export?format=" + fmt;
+}
+$("dldocx").onclick = () => download("docx");
+$("dlpdf").onclick = () => download("pdf");
+
+/* ------------------------------ ask -------------------------------- */
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("askform").requestSubmit(); }
+});
+
+$("askform").onsubmit = async (e) => {
+  e.preventDefault();
+  const q = $("q").value.trim();
+  if (!q) return;
+  const box = $("thread").querySelector(".wrap");
+  if ($("empty")) box.innerHTML = "";
+  box.appendChild(renderMsg("user", q, null));
+  $("threadhead").hidden = false;
+  $("q").value = "";
+  $("thread").scrollTop = $("thread").scrollHeight;
+
+  const btn = $("send");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Working';
+  const pending = document.createElement("div");
+  pending.className = "msg assistant";
+  pending.innerHTML = '<div class="who">Analyst</div><div class="bubble" style="color:#98A2B3">'
+    + "Reading the filings…</div>";
+  box.appendChild(pending);
+  $("thread").scrollTop = $("thread").scrollHeight;
+
+  try {
+    const body = { question: q };
+    if (state.convId) body.conversation_id = state.convId;
+    const out = await api("/ask", { method: "POST", body });
+    state.convId = out.conversation_id;
+    /* out.trace carries the same five fields list_messages joins in, so the badge on a fresh
+       answer is built from the same numbers the badge on a reloaded answer will be. */
+    box.replaceChild(renderMsg("assistant", out.answer, out.message_id, null, out.trace),
+                     pending);
+    await Promise.all([loadConvs(), refreshSpend()]);
+  } catch (err) {
+    pending.querySelector(".bubble").innerHTML =
+      '<span style="color:#B42318">' + esc(err.message) + "</span>";
+    if (err.status === 401) setTimeout(() => location.reload(), 1200);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Ask";
+    $("thread").scrollTop = $("thread").scrollHeight;
+    $("q").focus();
+  }
+};
+
+/* --------------------------- start up ------------------------------ */
+(async () => {
+  // TWO DIFFERENT FAILURES USED TO LAND IN ONE BARE catch, and that hid a real bug.
+  //
+  //   "not signed in"  - no cookie, expired, or revoked by a password change. Show the
+  //                      sign-in screen with NO error text; the user did nothing wrong.
+  //   anything else    - the session IS valid and something after it broke. Until now that
+  //                      also fell into the same catch and vanished, so a 500 on
+  //                      /conversations looked exactly like "my history disappeared":
+  //                      logged in, empty sidebar, no message, nothing in the way of an
+  //                      explanation. Server errors are now shown.
+  let me;
+  try {
+    me = await api("/auth/me");
+  } catch (e) {
+    return;                       // genuinely signed out - the auth screen is already up
+  }
+  state.user = me.user;
+  try {
+    await enterApp();
+  } catch (e) {
+    const bar = document.createElement("div");
+    bar.className = "err";
+    bar.style.margin = "12px";
+    bar.textContent = "Signed in, but the app could not load: " + e.message
+      + ". Your history is safe - reload to try again.";
+    document.querySelector("aside").appendChild(bar);
+  }
+})();
+</script>
+</body>
+</html>

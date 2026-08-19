@@ -153,6 +153,11 @@ class AgentState(TypedDict):
     jobs: List[SearchJob]    # work queue: Plan and Reflect enqueue, Retrieve drains
     chunks: List[Document]   # accumulated across rounds, de-duplicated by chunk id
     seen_ids: List[str]      # every chunk id retrieval ever touched - a RECORD, not a filter
+    retrieval_log: List[dict]  # per job, every candidate Chroma returned and whether it was
+                             # selected. Purely a RECORD, like seen_ids and jobs_log - nothing
+                             # reads it back, and the UI shows it so a reader can see how
+                             # nearest-neighbour selection actually went rather than trusting
+                             # that it went well.
     jobs_log: List[SearchJob]  # every job ever PLANNED, in order, never drained. `jobs` is a
                              # work queue and retrieve_node empties it, so by the time the
                              # graph finishes there is no record of what was planned - which
@@ -165,6 +170,13 @@ class AgentState(TypedDict):
     guard_fired: str         # which output guard fired, if any - "" when none did. Recorded
                              # rather than printed, so a dead attack can be attributed to the
                              # layer that killed it instead of to whichever layer is nearest.
+    degraded: str            # "" on a healthy run; otherwise WHICH fallback path was taken.
+                             # Phase 6.7. plan_node swallows its own exception and carries on
+                             # with one unfiltered search, which is the right call for
+                             # availability and the wrong thing to be silent about: that run
+                             # retrieves worse context and can refuse for a purely transient
+                             # reason. The cache reads this to decide whether a refusal is a
+                             # FINDING worth keeping or a bad afternoon worth forgetting.
 
 
 # --- Planner output schema --------------------------------------------------
@@ -325,8 +337,12 @@ def plan_node(state: AgentState) -> dict:
         if VERBOSE:
             print("[plan] planner failed, falling back to one unfiltered job:", e)
         fallback = [{"company": "", "period": "", "query": state["question"]}]
+        # Degrading is recorded, not merely printed. A run that reached here is still a real
+        # answer and still gets served - but if it comes back a refusal, the cache must not
+        # freeze it, because "the planner blew up so we searched blind" is exactly the
+        # transient cause a stored refusal would make permanent. See cache.cacheable.
         return {"jobs": fallback, "jobs_log": list(state.get("jobs_log") or []) + fallback,
-                "companies": []}
+                "companies": [], "degraded": f"planner-fallback: {type(e).__name__}"}
 
     jobs: List[SearchJob] = []
     for j in raw_jobs[:MAX_JOBS]:                  # bound enforced here, in code
@@ -459,7 +475,27 @@ def _search(query, k, where):
     delay = 1.0
     for attempt in range(1, SEARCH_ATTEMPTS + 1):
         try:
-            return vectorstore.similarity_search(query, k=k, filter=where)
+            # similarity_search_with_score, NOT similarity_search - and this is provably the
+            # same call. langchain_chroma implements similarity_search as
+            #     docs_and_scores = self.similarity_search_with_score(...)
+            #     return [doc for doc, _ in docs_and_scores]
+            # so asking for the scores changes nothing about which documents come back or in
+            # what order; it only stops us throwing away a number the store already computed.
+            #
+            # The distance is stamped onto the document's metadata under a leading underscore.
+            # Nothing downstream reads keys it does not know: fence_context asks for company,
+            # period and type by name. This is a RECORD for the trace panel, never an input to
+            # any decision - lesson 56 is emphatic that a cosine number means nothing on its
+            # own, and only the ORDER WITHIN ONE QUERY is meaningful.
+            pairs = vectorstore.similarity_search_with_score(query, k=k, filter=where)
+            docs = []
+            for rank, (doc, score) in enumerate(pairs, 1):
+                meta = dict(getattr(doc, "metadata", None) or {})
+                meta["_score"] = round(float(score), 4)
+                meta["_rank"] = rank
+                doc.metadata = meta
+                docs.append(doc)
+            return docs
         except Exception as e:
             if attempt == SEARCH_ATTEMPTS:
                 raise
@@ -515,13 +551,37 @@ def retrieve_node(state: AgentState) -> dict:
                      PER_JOB_FLOOR if first_round else FOLLOWUP_PER_JOB)
     kept.extend(picked)
 
+    # Record the selection. This runs AFTER _select and reads only its output, so it cannot
+    # influence what was chosen - which matters, because a "telemetry" change that alters the
+    # thing it measures is worse than no telemetry.
+    picked_ids = {d.id for d in picked}
+    log = list(state.get("retrieval_log") or [])
+    for job, docs in zip(state["jobs"], per_job):
+        log.append({
+            "round": state["rounds"] + 1,
+            "company": job.get("company") or "", "period": job.get("period") or "",
+            "query": job.get("query") or "",
+            "candidates": [{
+                "id": d.id,
+                "rank": (d.metadata or {}).get("_rank", i + 1),
+                "score": (d.metadata or {}).get("_score"),
+                "company": (d.metadata or {}).get("company"),
+                "period": ((d.metadata or {}).get("period") or "").split("(")[0].strip(),
+                "type": (d.metadata or {}).get("type"),
+                "kept": d.id in picked_ids,
+                "already_in_context": d.id in in_context,
+                "preview": (d.page_content or "")[:110].replace("\n", " "),
+            } for i, d in enumerate(docs)],
+        })
+
     if VERBOSE:
         fetched = sum(len(d) for d in per_job)
         print(f"[retrieve] round {state['rounds'] + 1}: {len(state['jobs'])} job(s) "
               f"-> {fetched} fetched, {len(picked)} selected, {len(kept)} in context")
 
     # Drain the queue. jobs is a work order list, not a record of what was planned.
-    return {"chunks": kept, "seen_ids": seen, "jobs": [], "rounds": state["rounds"] + 1}
+    return {"chunks": kept, "seen_ids": seen, "jobs": [], "retrieval_log": log,
+            "rounds": state["rounds"] + 1}
 
 
 def answer_node(state: AgentState) -> dict:
@@ -724,11 +784,13 @@ def run_agent(question: str, history=None) -> dict:
         "chunks": [],
         "seen_ids": [],
         "jobs_log": [],
+        "retrieval_log": [],
         "answer": "",
         "context": "",
         "rounds": 0,
         "companies": [],
         "guard_fired": "",
+        "degraded": "",
     }
     out = agent.invoke(initial)
     # Recorded, not printed. The trace panel shows the user what their question became, and a

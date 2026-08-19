@@ -45,6 +45,11 @@ def install(*modules):
 
     Idempotent: a module already pointing at the tracked version is skipped, so importing
     this from two places cannot double-count.
+
+    NOTE what this return value is and is NOT. It reports what this CALL changed, not what
+    is now true. On a second call it is correctly empty - and a caller that asserts on its
+    length reads "nothing was patched" as "nothing is patched", which is the opposite of the
+    truth. Assert on unpatched() instead; see the comment there.
     """
     patched = []
     for mod in modules:
@@ -52,6 +57,24 @@ def install(*modules):
             mod.log_cost = _tracked_log_cost
             patched.append(mod.__name__)
     return patched
+
+
+def unpatched(*modules):
+    """Return the names of modules whose log_cost is NOT the tracked one. Empty means safe.
+
+    This is the postcondition the callers actually care about: "every module that can make a
+    paid call routes through the capture". install()'s return value is a DIFF - what changed
+    this time - and a diff is worthless as a safety check the moment the work has already
+    been done by someone else.
+
+    That distinction was not academic. `python app.py` executes app.py once as `__main__`,
+    then uvicorn imports it AGAIN as `app`; the second pass patched nothing because the first
+    pass had already patched everything, and `assert len(install(...)) >= 3` killed a fully
+    correct process at start-up. Checking state instead of change fixes that AND still catches
+    the original danger - a module silently missed, under-reporting cost - by NAME.
+    """
+    return [mod.__name__ for mod in modules
+            if mod is not None and getattr(mod, "log_cost", None) is not _tracked_log_cost]
 
 
 @contextmanager
@@ -132,6 +155,16 @@ if __name__ == "__main__":
     fake_mod.log_cost = judges.log_cost
     assert install(fake_mod) == ["fake_agent"], "install() did not patch an importing module"
     assert install(fake_mod) == [], "install() is not idempotent - it would double-count"
+    ok += 1
+
+    # ...and the difference between "nothing changed" and "nothing is installed", which is the
+    # bug that took the API down at start-up. install() returning [] above must NOT mean the
+    # module is unprotected - unpatched() is the check that can tell those two apart.
+    assert unpatched(fake_mod) == [], "unpatched() called a patched module unpatched"
+    missed = types.ModuleType("forgotten_mod")
+    missed.log_cost = judges.log_cost              # imported it, never passed to install()
+    assert unpatched(fake_mod, missed) == ["forgotten_mod"], \
+        "unpatched() did not name a module that would under-report cost"
     ok += 1
 
     with capture() as calls:

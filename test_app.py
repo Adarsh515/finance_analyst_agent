@@ -42,10 +42,19 @@ class FakeDoc:
 ANSWER = "NVIDIA's total revenue for fiscal year 2026 was $215,938 million."
 
 
-def fake_run_agent(question, **_):
+# What the stub was last called with. The 6.6 live test found that /ask never passed history
+# at all - the 6.4 rewriter was built, tested in isolation and never wired - and no test here
+# could see it, because the stub ignored the argument exactly as confidently as the app did.
+LAST_CALL = {}
+
+
+def fake_run_agent(question, **kw):
     """Stands in for agent.run_agent. Logs paid calls exactly the way the real graph does,
     so the capture, the pricing and the trace rows are all genuinely exercised."""
     import agent as _agent
+    LAST_CALL.clear()
+    LAST_CALL.update({"question": question, **kw})
+    _ = kw
     _agent.log_cost("gemini-3.1-flash-lite", FakeResponse(912, 118), label="agent-plan")
     _agent.log_cost("gemini-3.1-flash-lite", FakeResponse(3736, 207), label="agent-generation")
     return {"question": question, "answer": ANSWER,
@@ -65,6 +74,11 @@ def main():
     import db
 
     appmod.agent.run_agent = fake_run_agent
+    # The rewriter is stubbed too, and for the same reason the agent is: this suite must cost
+    # nothing. Before /ask passed history it never called the rewriter, so this was not needed
+    # - which is itself a small sign that the wiring was missing.
+    appmod.rewriter.rewrite = lambda q, h: ((q, "no-history") if not h
+                                            else ("STANDALONE: " + q, None))
     client = TestClient(appmod.app)
     ok = 0
     skipped = []
@@ -291,6 +305,176 @@ def main():
                     headers=H).json()
     assert r["cached"] is False and "under attack" in r["not_cached_because"], r
     appmod.agent.run_agent = fake_run_agent
+    ok += 1
+
+    # the badge above an answer is built from fields list_messages joins in, so a reloaded
+    # conversation shows the same badges a fresh answer did. If those columns stop arriving,
+    # the badge silently disappears on reload only - the hardest kind of bug to notice.
+    conv_id = client.get("/conversations").json()["conversations"][0]["id"]
+    replayed = client.get("/conversations/" + str(conv_id)).json()["messages"]
+    bot = [m for m in replayed if m["role"] == "assistant"]
+    assert bot, "no assistant message to check"
+    for field in ("cache_hit", "usd", "saved_usd", "guard_fired", "question_rewritten"):
+        assert field in bot[0], f"list_messages dropped {field} - badges vanish on reload"
+    ok += 1
+
+    # --- Phase 6.7: a company that is not in the filings ---------------------------------------
+    # The learner's requirement, in his words: it should go through the pipeline exactly like
+    # NVIDIA does, answer, and then come from the database the second time. That is three
+    # separate claims and each one is checked.
+    def refusing_agent(question, **kw):
+        out = fake_run_agent(question, **kw)
+        out["answer"] = "Not stated in the filing."
+        return out
+    appmod.agent.run_agent = refusing_agent
+    TESLA = "What was Tesla's total revenue for fiscal year 2025?"
+
+    r1 = client.post("/ask", json={"question": TESLA}, headers=H).json()
+    assert r1["cache_hit"] is False, "a cold question hit the cache"
+    assert r1["answer"].startswith("Not stated"), r1["answer"]
+    # it went through the real pipeline: it was PAID for, and it has a trace with sources
+    assert r1["trace"]["usd"] > 0, "the out-of-corpus question was not actually run"
+    assert r1["trace"]["calls"], "no model calls recorded for an out-of-corpus question"
+    # ...and unlike 6.5, the refusal is now STORED
+    assert r1["cached"] is True, r1.get("not_cached_because")
+    ok += 1
+
+    # the second ask is served from the database, free, and is the same refusal
+    r2 = client.post("/ask", json={"question": TESLA}, headers=H).json()
+    assert r2["cache_hit"] is True, "the stored refusal was not served"
+    assert r2["answer"] == r1["answer"]
+    assert r2["cached_is_refusal"] is True, r2
+    assert r2["trace"]["usd"] == 0, "a single-turn cache hit charged the reader"
+    # the saving is recorded, and it equals what the first run actually paid - not an estimate
+    assert abs(r2["trace"]["saved_usd"] - r1["trace"]["usd"]) < 1e-12, (r2["trace"], r1["trace"])
+    assert r2["trace"]["saved_input_tokens"] == r1["trace"]["input_tokens"]
+    ok += 1
+
+    # a refusal from a run whose PLANNER FELL BACK must NOT be stored. That run searched blind,
+    # so its refusal may be transient - the one blip route that can still reach here.
+    def degraded_agent(question, **kw):
+        out = refusing_agent(question, **kw)
+        out["degraded"] = "planner-fallback: TimeoutError"
+        return out
+    appmod.agent.run_agent = degraded_agent
+    r = client.post("/ask", json={"question": "What was Rivian's net income in 2025?"},
+                    headers=H).json()
+    assert r["cached"] is False and "degraded" in r["not_cached_because"], r
+    appmod.agent.run_agent = fake_run_agent
+    ok += 1
+
+    # --- the UI is served, and it is the real one -----------------------------------------
+    r = client.get("/")
+    assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+    page = r.text
+    # These four are the things the 6.3 mockup did not have and the learner asked for. A
+    # smoke test that only checked for "200 OK" would happily pass on the old mockup.
+    for needed in ("authform", "convs", "trace", "askform"):
+        assert needed in page, f"the served UI has no {needed} - is this still the mockup?"
+    # NOT a substring check on "ui_mockup" - the real file mentions the mockup by name in its
+    # header, explaining what it replaces, so that check failed on a correct page. Check for
+    # the mockup's own marker instead: the thing that would be true if the WRONG file were
+    # being served.
+    assert "DESIGN ONLY" not in page, "app.py is serving the 6.3 mockup, not the real UI"
+    ok += 1
+
+    # --- follow-ups actually reach the rewriter, and the cache is keyed on the REWRITE ------
+    # Both of these were live defects found by using the UI, not by any test here:
+    #   1. /ask called run_agent with no history, so the 6.4 rewriter never ran in the app.
+    #   2. the cache was keyed on the RAW question, so "And AMD?" became a global key - the
+    #      catastrophic cache key the tracker named in the 6.5 plan, shipped by accident.
+    import cache as _cache
+    import rewriter as _rw
+    _c2 = db.connect(); _cache.clear(_c2); _c2.close()
+
+    seen_rewrites = []
+
+    def fake_rewrite(question, history):
+        seen_rewrites.append((question, list(history or [])))
+        if not history:
+            return question, "no-history"
+        return "REWRITTEN " + question, None
+
+    real_rewrite, appmod.rewriter.rewrite = appmod.rewriter.rewrite, fake_rewrite
+    try:
+        first = client.post("/ask", json={"question": "Base question about NVIDIA?"},
+                            headers=H).json()
+        cid = first["conversation_id"]
+        assert seen_rewrites, (
+            "FAIL: /ask never called the rewriter at all. The 6.4 rewriter was built, tested "
+            "in isolation, and never wired into the serving path.")
+        assert seen_rewrites[-1][1] == [], "a first turn must have no history"
+
+        follow = client.post("/ask", json={"question": "And AMD?", "conversation_id": cid},
+                             headers=H).json()
+        # the rewriter must have SEEN the conversation
+        q_seen, hist_seen = seen_rewrites[-1]
+        assert q_seen == "And AMD?", q_seen
+        assert len(hist_seen) >= 2, (
+            f"FAIL: /ask passed {len(hist_seen)} history turns - the rewriter cannot resolve "
+            f"a follow-up it was never shown. This is the defect the UI exposed.")
+        assert hist_seen[-1][0] == "assistant", "history should end with the previous answer"
+        assert not any(h[1] == "And AMD?" for h in hist_seen), \
+            "the question being asked must not be inside its own history"
+        # ...and the trace must record what the pipeline was actually asked
+        assert follow["trace"]["question_rewritten"] == "REWRITTEN And AMD?", follow["trace"]
+        ok += 1
+
+        # THE CACHE KEY. "And AMD?" must be stored under the REWRITTEN question, so the same
+        # words in a different conversation cannot collect someone else's answer.
+        _c3 = db.connect()
+        keys = [r["normalised_question"] for r in
+                _c3.execute("SELECT normalised_question FROM answer_cache").fetchall()]
+        _c3.close()
+        assert "and amd?" not in keys and "and amd" not in keys, (
+            f"FAIL: the cache is keyed on the raw follow-up. Keys: {keys}. "
+            f'"And AMD?" means something different in every conversation.')
+        assert any(k.startswith("rewritten and amd") for k in keys), keys
+        ok += 1
+    finally:
+        appmod.rewriter.rewrite = real_rewrite
+
+    # --- export: the transcript, and ONLY the transcript ------------------------------------
+    conv_for_export = client.get("/conversations").json()["conversations"][0]["id"]
+    detail = client.get("/conversations/" + str(conv_for_export)).json()
+    said = [m["content"] for m in detail["messages"]]
+    for fmt, sig in (("docx", b"PK"), ("pdf", b"%PDF")):
+        r = client.get(f"/conversations/{conv_for_export}/export?format={fmt}")
+        assert r.status_code == 200, f"{fmt}: {r.status_code} {r.text[:200]}"
+        assert r.content[:4].startswith(sig), f"{fmt} is not a real {fmt} file"
+        assert "attachment" in r.headers.get("content-disposition", "")
+        assert len(r.content) > 800, f"{fmt} export is suspiciously small"
+    # a docx is a zip of XML, so the transcript text is greppable inside it - which lets the
+    # test check the thing that actually matters: the conversation is in, the analysis is out.
+    import io, zipfile
+    z = zipfile.ZipFile(io.BytesIO(
+        client.get(f"/conversations/{conv_for_export}/export?format=docx").content))
+    xml = z.read("word/document.xml").decode("utf-8", "replace")
+    assert any(t[:30] in xml for t in said), "the export does not contain the conversation"
+    for leaked in ("agent-generation", "chunk_ids", "nvda-fy2026", "input_tokens",
+                   "gemini-3.1-flash-lite"):
+        assert leaked not in xml, f"the transcript export leaked analysis: {leaked!r}"
+    ok += 1
+
+    # another user must not be able to export this conversation
+    assert other.get(f"/conversations/{conv_for_export}/export").status_code == 404
+    ok += 1
+
+    # --- app.py must survive being imported TWICE --------------------------------------------
+    # Not a hypothetical. `python app.py` runs this file as `__main__`, then uvicorn's import
+    # string re-imports it as `app`, and the second pass died on
+    #     AssertionError: cost tracking reached only []
+    # because the start-up check asserted on what telemetry.install() CHANGED rather than on
+    # what was true. Every route test above passed the whole time - they import the module once,
+    # like every harness in this repo, so none of them could see it. Booting the module a second
+    # time is the smallest thing that can.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("app_second_import", appmod.__file__)
+    second = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(second)          # must not raise
+    assert not appmod.telemetry.unpatched(appmod.judges, appmod.rag,
+                                          appmod.agent, appmod.rewriter), \
+        "a second import left cost tracking detached"
     ok += 1
 
     print(f"\ntest_app.py: {ok}/{ok} route checks passed, $0.00 spent")

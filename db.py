@@ -33,7 +33,9 @@ DB_PATH = os.environ.get("APP_DB", "app.db")
 #                            messages, traces, trace_calls
 # v2  2026-08-18  Phase 6.2  login_attempts (rate limiting)
 # v3  2026-08-18  Phase 6.5  answer_cache (exact-match, fingerprint in the key)
-SCHEMA_VERSION = 3
+# v4  2026-08-18  Phase 6.6  traces.retrieval_json + answer_cache.retrieval_json
+# v5  2026-08-19  Phase 6.7  traces.saved_* (what the first run cost) + answer_cache.is_refusal
+SCHEMA_VERSION = 5
 
 
 def utcnow():
@@ -230,6 +232,32 @@ MIGRATIONS = {
     );
     CREATE INDEX IF NOT EXISTS ix_cache_fp ON answer_cache(fingerprint);
     """,
+    # Phase 6.6. What Chroma returned per job and which candidates survived selection. It is
+    # a RECORD for the trace panel: the UI shows how nearest-neighbour selection actually
+    # went, instead of asking the reader to take "retrieval worked" on trust.
+    4: """
+    ALTER TABLE traces ADD COLUMN retrieval_json TEXT;
+    ALTER TABLE answer_cache ADD COLUMN retrieval_json TEXT;
+    """,
+    # Phase 6.7. Two changes, both about telling the truth on a cache hit.
+    #
+    # traces.saved_* - what the FIRST run of this question actually cost. A hit's own cost is
+    # already in traces.usd (zero on a single-turn hit, the price of the rewrite on a
+    # follow-up). Without the original alongside it there is no honest way to say what the
+    # cache is worth: the UI would either claim a saving it cannot evidence, or show a zero
+    # and imply the answer was free to create. Stored per trace, not recomputed in the UI,
+    # for the same reason as every other number in the panel - see the 6.1 contract.
+    #
+    # answer_cache.is_refusal - refusals are cacheable from 6.7 and they are not ordinary
+    # answers. Marking them lets the panel say WHICH kind of thing came back from the cache,
+    # lets stats() report them apart from real answers, and makes it possible to purge only
+    # the refusals if the corpus grows to cover one.
+    5: """
+    ALTER TABLE traces ADD COLUMN saved_usd REAL NOT NULL DEFAULT 0.0;
+    ALTER TABLE traces ADD COLUMN saved_input_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE traces ADD COLUMN saved_output_tokens INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE answer_cache ADD COLUMN is_refusal INTEGER NOT NULL DEFAULT 0;
+    """,
 }
 
 
@@ -255,7 +283,20 @@ def connect(path=None):
     if it enforces something it does not, and the first sign of trouble is orphaned rows
     months later. It is switched on here, and the self-test checks that it actually bit.
     """
-    conn = sqlite3.connect(path or DB_PATH)
+    # check_same_thread=False, and the reason is specific rather than a shrug.
+    #
+    # FastAPI resolves a dependency and runs the endpoint on its worker THREAD POOL, and it
+    # does not promise both land on the same thread. A connection opened while resolving
+    # `get_db` in thread A and used by the endpoint in thread B raises
+    # "SQLite objects created in a thread can only be used in that same thread" - a 500 on
+    # /conversations that looked, in the browser, exactly like "my history disappeared".
+    #
+    # This is SAFE here and it is worth being precise about why: the connection is handed
+    # from one thread to the next SEQUENTIALLY, one request at a time, and is never used by
+    # two threads at once. check_same_thread=False disables Python's ownership check; it does
+    # NOT make a connection safe to share CONCURRENTLY, and nothing in this repo does that.
+    # One connection per request stays the rule.
+    conn = sqlite3.connect(path or DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")    # readers do not block the writer
@@ -406,9 +447,21 @@ def add_message(conn, conversation_id, role, content):
 
 
 def list_messages(conn, conversation_id):
+    """Messages plus the few trace fields the message list itself needs to render.
+
+    The badges above an answer - served from cache, guard fired, follow-up rewritten - must
+    look the SAME whether the message has just been answered or is being read back from
+    history a week later. The live path has the trace in hand from /ask; the history path did
+    not, so a badge built only from the live response would appear on a fresh answer and
+    vanish on reload. Fetching the full trace per message instead would mean forty requests to
+    open a forty-message conversation, and the panel already loads that lazily on expand.
+    A LEFT JOIN of five columns costs one query and removes the whole divergence.
+    """
     return conn.execute(
-        "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id", (conversation_id,)
-    ).fetchall()
+        "SELECT m.*, t.cache_hit, t.usd, t.saved_usd, t.guard_fired, t.reflect_fired, "
+        "       t.question_rewritten "
+        "FROM messages m LEFT JOIN traces t ON t.message_id = m.id "
+        "WHERE m.conversation_id = ? ORDER BY m.id", (conversation_id,)).fetchall()
 
 
 def history_pairs(conn, conversation_id, limit_turns=6):
@@ -430,7 +483,8 @@ def history_pairs(conn, conversation_id, limit_turns=6):
 def save_trace(conn, *, message_id, conversation_id, user_id, question_raw,
                question_rewritten=None, jobs=None, filings=None, chunk_ids=None,
                rounds=None, reflect_fired=False, guard_fired="", cache_hit=False,
-               calls=(), seconds=None):
+               calls=(), seconds=None, retrieval=None,
+               saved_usd=0.0, saved_input_tokens=0, saved_output_tokens=0):
     """Write one answered question's full provenance, header and per-call rows, atomically.
 
     `calls` is the list of (label, input_tokens, output_tokens, model, usd) tuples captured
@@ -448,15 +502,21 @@ def save_trace(conn, *, message_id, conversation_id, user_id, question_raw,
         "INSERT INTO traces (message_id, conversation_id, user_id, question_raw, "
         " question_rewritten, jobs_json, filings_json, chunk_ids_json, rounds, "
         " reflect_fired, guard_fired, cache_hit, input_tokens, output_tokens, usd, "
-        " seconds, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " seconds, created_at, retrieval_json, "
+        " saved_usd, saved_input_tokens, saved_output_tokens) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (message_id, conversation_id, user_id, question_raw, question_rewritten,
          json.dumps(jobs) if jobs is not None else None,
          json.dumps(filings) if filings is not None else None,
          json.dumps(chunk_ids) if chunk_ids is not None else None,
          rounds, int(bool(reflect_fired)), guard_fired or "", int(bool(cache_hit)),
          sum(r[3] for r in rows), sum(r[4] for r in rows), sum(r[5] for r in rows),
-         seconds, utcnow()))
+         seconds, utcnow(),
+         json.dumps(retrieval) if retrieval is not None else None,
+         # What the first run cost. Only ever non-zero on a cache hit, and the caller reads it
+         # off the cached row rather than estimating it - a "saving" the product invented
+         # would be marketing, not measurement.
+         float(saved_usd), int(saved_input_tokens), int(saved_output_tokens)))
     trace_id = cur.lastrowid
     conn.executemany(
         "INSERT INTO trace_calls (trace_id, seq, label, model, input_tokens, output_tokens, usd) "
@@ -471,7 +531,7 @@ def get_trace(conn, message_id):
     if t is None:
         return None
     out = dict(t)
-    for k in ("jobs_json", "filings_json", "chunk_ids_json"):
+    for k in ("jobs_json", "filings_json", "chunk_ids_json", "retrieval_json"):
         out[k[:-5]] = json.loads(out.pop(k)) if out[k] else None
     out["calls"] = [dict(r) for r in conn.execute(
         "SELECT seq, label, model, input_tokens, output_tokens, usd FROM trace_calls "
@@ -544,10 +604,19 @@ if __name__ == "__main__":
     v1.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)", (utcnow(),))
     v1.commit()
     assert schema_version(v1) == 1
-    assert migrate(v1) == [2, 3] and schema_version(v1) == 3
+    # Derived from MIGRATIONS, not typed out. A hard-coded [2, 3, 4] has to be edited by hand
+    # every time a migration is added, and the edit is invisible until the assert fails on
+    # someone else's machine - which is what happened when v5 landed.
+    expected = sorted(v for v in MIGRATIONS if v > 1)
+    assert migrate(v1) == expected and schema_version(v1) == SCHEMA_VERSION
+    assert max(expected) == SCHEMA_VERSION, \
+        f"SCHEMA_VERSION is {SCHEMA_VERSION} but the newest migration is {max(expected)}"
     assert migrate(v1) == [], "migrate() is not idempotent - it re-applied a done migration"
     v1.execute("SELECT COUNT(*) FROM login_attempts")     # raises if the table is missing
     v1.execute("SELECT COUNT(*) FROM answer_cache")
+    v1.execute("SELECT retrieval_json FROM traces LIMIT 1")
+    v1.execute("SELECT saved_usd, saved_input_tokens, saved_output_tokens FROM traces LIMIT 1")
+    v1.execute("SELECT is_refusal FROM answer_cache LIMIT 1")
     ok += 1
 
     uid = create_user(c, "Adarsh@Example.COM", "Adarsh")
@@ -612,7 +681,8 @@ if __name__ == "__main__":
                      filings=["NVIDIA FY2026 10-K"], chunk_ids=["nvda-fy2026-t12-p0"],
                      rounds=1, reflect_fired=False,
                      guard_fired="quarantine:['999999'] -> regenerated from trusted chunks only",
-                     calls=calls, seconds=8.4)
+                     calls=calls, seconds=8.4,
+                     retrieval=[{"query": "revenue", "candidates": []}])
     t = get_trace(c, m_bot)
     # the header totals are SUMs of the call rows, computed in one place, so they cannot drift
     assert t["input_tokens"] == 900 + 3736 + 3100
@@ -620,10 +690,32 @@ if __name__ == "__main__":
     assert abs(t["usd"] - sum(x[4] for x in calls)) < 1e-12
     assert len(t["calls"]) == 3 and t["calls"][0]["label"] == "agent-plan"
     assert t["filings"] == ["NVIDIA FY2026 10-K"] and t["guard_fired"].startswith("quarantine:")
+    assert t["retrieval"] == [{"query": "revenue", "candidates": []}], t.get("retrieval")
+    # a paid run records no saving - "avoided by the cache" must be zero unless a cache hit
+    # actually avoided something
+    assert t["saved_usd"] == 0.0 and t["saved_input_tokens"] == 0
     ok += 1
 
+    # ...and a cache hit records BOTH numbers: what the reader paid, and what the first run of
+    # this question paid. The panel prints these side by side, so if they could not both be
+    # stored the saving would have to be guessed in JavaScript.
+    m_hit = add_message(c, conv, "assistant", "Revenue was $215,938 million.")
+    save_trace(c, message_id=m_hit, conversation_id=conv, user_id=uid,
+               question_raw="And AMD?", question_rewritten="What was AMD's total revenue?",
+               cache_hit=True,
+               calls=[("agent-rewrite", 210, 18, "gemini-3.1-flash-lite", 0.000048)],
+               saved_usd=0.00062, saved_input_tokens=3736, saved_output_tokens=210)
+    th = get_trace(c, m_hit)
+    assert th["cache_hit"] == 1
+    assert abs(th["usd"] - 0.000048) < 1e-12, "a follow-up cache hit is NOT free - the rewrite"
+    assert abs(th["saved_usd"] - 0.00062) < 1e-12 and th["saved_input_tokens"] == 3736
+    ok += 1
+
+    # Spend counts BOTH traces, and counts the cache hit at what it really cost. The avoided
+    # 3,736 tokens are deliberately NOT in here: user_spend is what this reader was charged,
+    # not what they would have been charged in a world without a cache.
     spend = user_spend(c, uid)
-    assert spend["questions"] == 1 and spend["input_tokens"] == 7736
+    assert spend["questions"] == 2 and spend["input_tokens"] == 7736 + 210, spend
     ok += 1
 
     # failures accumulate, and a SUCCESS clears the slate - otherwise one typo a month

@@ -26,7 +26,8 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from html import escape as _x
 from pydantic import BaseModel, Field
 
 import auth
@@ -63,8 +64,16 @@ import telemetry        # noqa: E402
 
 import rewriter      # noqa: E402  - holds its own log_cost binding; see run_eval.py
 
-_patched = telemetry.install(judges, rag, agent, rewriter)
-assert len(_patched) >= 3, f"cost tracking reached only {_patched}"
+_TRACKED = (judges, rag, agent, rewriter)
+telemetry.install(*_TRACKED)
+# Assert the STATE, not the change. `assert len(install(...)) >= 3` was here and it was wrong:
+# install() returns what this call patched, so a second import of this module - which is
+# exactly what `python app.py` causes - patched nothing, and the assertion read that correct
+# no-op as "cost tracking reached only []" and refused to start. unpatched() answers the
+# question that was always meant: is every module that can make a paid call routed through
+# the capture right now, whoever installed it.
+assert not telemetry.unpatched(*_TRACKED), \
+    f"cost tracking never reached {telemetry.unpatched(*_TRACKED)} - spend would be under-reported"
 
 agent.VERBOSE = False
 
@@ -197,6 +206,18 @@ def _auth_error(request: Request, exc: auth.AuthError):
 
 # --- routes: health and corpus -------------------------------------------------------------------
 
+# --- the interface ---------------------------------------------------------------------------
+# One file, read from disk on each request so a UI edit needs no restart. No framework, no
+# build step, no CDN: the whole front end is `uvicorn app:app` and a browser, which is what
+# makes it runnable by someone who did not write it.
+_UI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui.html")
+
+
+@app.get("/")
+def index():
+    return FileResponse(_UI, media_type="text/html")
+
+
 @app.get("/health")
 def health():
     """Deliberately reports the CONFIGURATION, not just 'ok'.
@@ -310,6 +331,93 @@ def archive_conversation(conversation_id: int, user=Depends(current_user),
     return {"ok": True}
 
 
+# --- export ---------------------------------------------------------------------------------
+# THE TRANSCRIPT ONLY: questions, answers, timestamps. No sources, no pipeline, no tokens, no
+# cost. That is what was asked for and it is also the right split - the trace panel is an
+# engineering artefact, and a document mixing it into the conversation would be neither a
+# clean record nor a usable audit trail. If an audit export is ever wanted it should be its
+# own endpoint with its own format, not this one with a flag.
+#
+# Both formats are generated in memory and streamed; nothing is written to disk, so there is
+# no temp file to leak between users on a shared machine.
+
+def _transcript(conn, conversation_id, user_id):
+    conv = _owned_conversation(conn, conversation_id, user_id)
+    rows = db.list_messages(conn, conversation_id)
+    return conv, [(r["role"], r["content"], r["created_at"]) for r in rows]
+
+
+def _safe_name(title, ext):
+    keep = "".join(ch if (ch.isalnum() or ch in " -_") else "" for ch in (title or "chat"))
+    return (keep.strip()[:60] or "conversation") + ext
+
+
+@app.get("/conversations/{conversation_id}/export")
+def export_conversation(conversation_id: int, format: str = "docx",
+                        user=Depends(current_user), conn=Depends(get_db)):
+    import io
+    conv, msgs = _transcript(conn, conversation_id, user["id"])
+    fmt = (format or "docx").lower()
+    if fmt not in ("docx", "pdf"):
+        raise HTTPException(400, "format must be docx or pdf")
+    buf = io.BytesIO()
+
+    if fmt == "docx":
+        try:
+            from docx import Document as Docx
+            from docx.shared import Pt, RGBColor
+        except ImportError:
+            raise HTTPException(
+                501, "python-docx is not installed. Run: pip install python-docx")
+        doc = Docx()
+        doc.add_heading(conv["title"], level=1)
+        p = doc.add_paragraph(f"Financial Research & Compliance Analyst · exported "
+                              f"{db.utcnow()}")
+        p.runs[0].font.size = Pt(9)
+        p.runs[0].font.color.rgb = RGBColor(0x98, 0xA2, 0xB3)
+        for role, content, created in msgs:
+            head = doc.add_paragraph()
+            r = head.add_run(("You" if role == "user" else "Analyst") + "  ·  " + created)
+            r.bold = True
+            r.font.size = Pt(9)
+            body = doc.add_paragraph(content)
+            body.paragraph_format.space_after = Pt(12)
+        doc.save(buf)
+        media = ("application/vnd.openxmlformats-officedocument"
+                 ".wordprocessingml.document")
+    else:
+        try:
+            from reportlab.lib.pagesizes import A4
+            from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+            from reportlab.lib.units import mm
+            from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        except ImportError:
+            raise HTTPException(501, "reportlab is not installed. Run: pip install reportlab")
+        ss = getSampleStyleSheet()
+        who = ParagraphStyle("who", parent=ss["Normal"], fontSize=8, textColor="#98A2B3",
+                             spaceAfter=2)
+        body = ParagraphStyle("body", parent=ss["Normal"], fontSize=10.5, leading=15,
+                              spaceAfter=12)
+        doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm,
+                                leftMargin=20 * mm, rightMargin=20 * mm,
+                                title=conv["title"])
+        flow = [Paragraph(_x(conv["title"]), ss["Heading1"]),
+                Paragraph("Financial Research &amp; Compliance Analyst · exported "
+                          + db.utcnow(), who),
+                Spacer(1, 8)]
+        for role, content, created in msgs:
+            flow.append(Paragraph(("You" if role == "user" else "Analyst")
+                                  + " &nbsp;·&nbsp; " + created, who))
+            flow.append(Paragraph(_x(content).replace("\n", "<br/>"), body))
+        doc.build(flow)
+        media = "application/pdf"
+
+    buf.seek(0)
+    name = _safe_name(conv["title"], "." + fmt)
+    return StreamingResponse(buf, media_type=media, headers={
+        "Content-Disposition": f'attachment; filename="{name}"'})
+
+
 @app.get("/messages/{message_id}/trace")
 def get_trace(message_id: int, user=Depends(current_user), conn=Depends(get_db)):
     """Everything the trace panel shows, exactly as stored. No arithmetic happens here.
@@ -343,40 +451,70 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     if body.conversation_id is None:
         title = question[:60] + ("…" if len(question) > 60 else "")
         conversation_id = db.create_conversation(conn, user["id"], title)
+        history = []
     else:
         conversation_id = _owned_conversation(conn, body.conversation_id, user["id"])["id"]
+        # BEFORE the new message is stored, or the question ends up inside its own history.
+        history = db.history_pairs(conn, conversation_id)
 
     db.add_message(conn, conversation_id, "user", question)
 
-    # --- the cache, consulted BEFORE anything is paid for -----------------------------------
-    # Keyed on the question as asked. From 6.4 a follow-up would have to be keyed on the
-    # REWRITTEN question instead - "aur uska net income?" means something different in every
-    # conversation and is a catastrophic cache key - and the rewrite costs a call, so a
-    # conversation turn is looked up only after it has been rewritten. Single-turn questions,
-    # which is what a cache actually helps with, are looked up for free right here.
+    # --- rewrite, then cache, then answer ---------------------------------------------------
+    # THE ORDER IS THE POINT, and getting it wrong was a live defect found by using the UI
+    # rather than by any test:
+    #
+    #   1. This endpoint used to call run_agent WITHOUT history, so the 6.4 rewriter never ran
+    #      in the product at all. "And what was its net income?" reached the pipeline verbatim
+    #      and came back with "please specify which company". A feature built, measured at
+    #      14/14 in its own eval, and never wired to anything.
+    #   2. The cache was keyed on the RAW question, so "And AMD?" became a global cache key -
+    #      the exact catastrophic key the 6.5 plan named in advance, shipped by accident. The
+    #      comment here even claimed the opposite of what the code did, which is worse than
+    #      having no comment.
+    #
+    # So the rewrite happens HERE, in front of the cache, rather than inside run_agent: the
+    # cache sits before the agent, and it must be keyed on the standalone question. run_agent
+    # is then called with no history, so nothing is rewritten twice.
     import time
     t0 = time.perf_counter()
-    hit = cache.get(conn, question, CACHE_FINGERPRINT) if CACHE_ENABLED else None
+    with telemetry.capture() as calls:
+        asked, rewrite_note = rewriter.rewrite(question, history)
+        rewritten = asked if history else None
+
+        hit = cache.get(conn, asked, CACHE_FINGERPRINT) if CACHE_ENABLED else None
+        if hit is None:
+            out = agent.run_agent(question=asked)
+
     if hit is not None:
         message_id = db.add_message(conn, conversation_id, "assistant", hit["answer"])
         db.save_trace(
             conn, message_id=message_id, conversation_id=conversation_id, user_id=user["id"],
-            question_raw=question, question_rewritten=None,
+            question_raw=question, question_rewritten=rewritten,
             jobs=json.loads(hit["jobs_json"]) if hit["jobs_json"] else None,
             filings=json.loads(hit["filings_json"]) if hit["filings_json"] else None,
             chunk_ids=json.loads(hit["chunk_ids_json"]) if hit["chunk_ids_json"] else None,
+            retrieval=json.loads(hit["retrieval_json"]) if hit["retrieval_json"] else None,
             rounds=hit["rounds"], reflect_fired=False, guard_fired="", cache_hit=True,
-            # NO calls, so this user's spend correctly records ZERO for this question. The
-            # trace row is still theirs; only the money is not.
-            calls=(), seconds=round(time.perf_counter() - t0, 3))
+            # A cache hit on a SINGLE-TURN question is free. A hit on a follow-up is not: the
+            # rewrite was paid for before the lookup could happen, and recording it as zero
+            # would understate what this product costs.
+            calls=telemetry.rows_for_db(calls),
+            # ...and what it would have cost WITHOUT the cache, read off the stored row rather
+            # than estimated. This is the only honest way for the panel to claim a saving:
+            # the number is what the first run of this exact question actually paid.
+            saved_usd=hit["usd"], saved_input_tokens=hit["input_tokens"],
+            saved_output_tokens=hit["output_tokens"],
+            seconds=round(time.perf_counter() - t0, 3))
         return {"conversation_id": conversation_id, "message_id": message_id,
                 "answer": hit["answer"], "context": hit["context"],
                 "rounds": hit["rounds"], "guard_fired": "", "cache_hit": True,
+                "cached_is_refusal": bool(hit["is_refusal"]),
+                "cached_at": hit["created_at"],
+                "rewrite_note": rewrite_note,
                 "trace": db.get_trace(conn, message_id)}
 
-    # THE CONTRACT. Same function the eval calls, same capture the eval uses.
-    with telemetry.capture() as calls:
-        out = agent.run_agent(question=question)
+    # THE CONTRACT. run_agent above is the exact function run_eval.py calls, inside the exact
+    # capture run_eval.py uses.
     seconds = round(time.perf_counter() - t0, 3)
 
     answer = out["answer"]
@@ -392,7 +530,7 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     db.save_trace(
         conn, message_id=message_id, conversation_id=conversation_id, user_id=user["id"],
         question_raw=question,
-        question_rewritten=None,          # Phase 6.4 fills this in
+        question_rewritten=rewritten,
         # jobs_log, NOT jobs. `jobs` is a work queue that retrieve_node drains, so by the
         # time the graph returns it is empty and the panel would show "no plan" on every
         # single question - a blank that looks like a UI bug and is actually a lost record.
@@ -404,7 +542,8 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
         # the run, not inferred in the UI later - see the 6.1 contract.
         reflect_fired=bool(out.get("rounds") and out["rounds"] > 1),
         guard_fired=out.get("guard_fired") or "",
-        cache_hit=False,                  # Phase 6.5 fills this in
+        retrieval=out.get("retrieval_log") or None,
+        cache_hit=False,
         calls=telemetry.rows_for_db(calls),
         seconds=seconds)
     totals = telemetry.summarise(calls)
@@ -413,10 +552,15 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     # under attack or any refusal, and it says which - recorded rather than silent, so a cache
     # that is never filling up is visible instead of merely disappointing.
     stored, why_not = (cache.put(
-        conn, question=question, fingerprint=CACHE_FINGERPRINT, answer=answer,
+        # `asked`, not `question`: the key must be the standalone question, never the raw
+        # follow-up. See the ordering note above.
+        conn, question=asked, fingerprint=CACHE_FINGERPRINT, answer=answer,
         context=out["context"], guard_fired=out.get("guard_fired") or "",
         jobs=out.get("jobs_log") or None, filings=filings_used,
         chunk_ids=[c for c in chunk_ids if c], rounds=out.get("rounds"),
+        retrieval=out.get("retrieval_log") or None,
+        # 6.7: a refusal IS stored now, but not one from a run whose planner fell back.
+        degraded=out.get("degraded") or "",
         input_tokens=totals["input_tokens"], output_tokens=totals["output_tokens"],
         usd=totals["usd"], user_id=user["id"]) if CACHE_ENABLED else (False, "cache disabled"))
 
@@ -425,6 +569,7 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
         "message_id": message_id,
         "cache_hit": False,
         "cached": stored, "not_cached_because": why_not,
+        "rewrite_note": rewrite_note,
         # the same fields run_eval.py scores, under the same names the agent returns them by
         "answer": answer,
         "context": out["context"],
@@ -436,4 +581,13 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
+
+    # The app OBJECT, not the string "app:app". uvicorn resolves an import string by importing
+    # the module - and this module is already running, under the name `__main__`. Python's
+    # module cache has no entry for `app`, so it would execute this whole file a SECOND time:
+    # two FastAPI instances, two init_db calls, two of every module-level side effect, and the
+    # one that is served is not the one whose globals `__main__` just set up.
+    #
+    # The import-string form is only worth its cost when reload=True, which needs a name it can
+    # re-import on every file change. Serving is reload=False, so the object is strictly better.
+    uvicorn.run(app, host="127.0.0.1", port=8000)
