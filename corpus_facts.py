@@ -28,6 +28,11 @@ import re
 
 from cross_set import CROSS_SET
 from golden_set import GOLDEN_SET
+# Phase 6.8. The verified sets are now THREE. This import is not optional bookkeeping: without
+# it, every Tesla figure - 54,941 total liabilities, 134,785 employees - reads as unverified,
+# and unverified() would flag a correct figure while staying silent about a wrong one. The
+# check is only as wide as the sources it reads.
+from tesla_set import TESLA_SET
 
 # Every figure-shaped token in the two verified sets, taken from the DATA rather than by
 # reading the source files, so a comment cannot accidentally verify a number.
@@ -35,7 +40,7 @@ _FIGURE_RE = re.compile(r"\d[\d,]*\.?\d*")
 
 
 def _verified_tokens():
-    blob = json.dumps([GOLDEN_SET, CROSS_SET], ensure_ascii=False)
+    blob = json.dumps([GOLDEN_SET, CROSS_SET, TESLA_SET], ensure_ascii=False)
     return {m.group(0) for m in _FIGURE_RE.finditer(blob)}
 
 
@@ -85,5 +90,13 @@ if __name__ == "__main__":
     assert unverified("in fiscal year 2026 across 6 turns and 22 items") == []
     ok += 1
 
-    print(f"corpus_facts.py: {len(VERIFIED):,} verified figure tokens, "
+    # Phase 6.8: the sixth filing's figures must be reachable through this module, or the
+    # check silently stops covering a whole company. Named explicitly rather than counted,
+    # because a total going up proves nothing about WHICH figures went in.
+    for fig in ("94,827", "54,941", "134,785", "3,794", "14,747", "6,411", "17,094"):
+        assert is_verified(fig), f"Tesla figure {fig} is not reachable - is TESLA_SET imported?"
+    assert unverified("Tesla's total liabilities were $54,941 million") == []
+    ok += 1
+
+    print(f"corpus_facts.py: {len(VERIFIED):,} verified figure tokens across three sets, "
           f"{ok}/{ok} checks passed, $0.00 spent")

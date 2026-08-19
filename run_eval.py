@@ -52,6 +52,17 @@ from judges_rubric import rubric_judge
 from judges_scope import scope_judge
 from golden_set import GOLDEN_SET
 from cross_set import CROSS_SET, bucket
+from tesla_set import TESLA_SET, bucket as tesla_bucket
+
+# Ids must be unique ACROSS the three sets, checked HERE because this is the file that selects
+# by id: `--ids t01` cannot mean two different questions. tesla_set.py shipped with t01..t08
+# while cross_set.py already used t01..t03 for TREND questions, and nothing noticed, because
+# each set only checked itself. The check belongs where the ambiguity would be resolved.
+_ALL_IDS = [e["id"] for e in GOLDEN_SET] + [e["id"] for e in CROSS_SET] + \
+           [e["id"] for e in TESLA_SET]
+_DUPES = sorted({i for i in _ALL_IDS if _ALL_IDS.count(i) > 1})
+assert not _DUPES, (f"duplicate question ids across the eval sets: {_DUPES}. --ids selects by "
+                    f"id alone, so a collision silently runs the wrong question.")
 
 load_dotenv()
 
@@ -73,7 +84,10 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--agent", action="store_true",
                     help="use the LangGraph agent instead of the baseline path")
 parser.add_argument("--set", dest="which", default="both",
-                    choices=["regression", "capability", "both"])
+                    choices=["regression", "capability", "both", "tesla", "all"],
+                    help="both = regression+capability, the historic pair, so gate-to-gate\n"
+                         "comparisons stay against the same population. Phase 6.8 added a\n"
+                         "sixth filing and its own set; 'all' includes it.")
 parser.add_argument("--ids", default="",
                     help="comma-separated question ids; runs only these")
 parser.add_argument("--workers", type=int, default=6,
@@ -411,7 +425,9 @@ if __name__ == "__main__":
           + (f"  ids={sorted(ONLY_IDS)}" if ONLY_IDS else "")
           + (f"  out={args.out}" if args.out else "") + "\n")
 
-    if args.which in ("regression", "both"):
+    if args.which in ("regression", "both", "all"):
         run_set("REGRESSION - NVIDIA only", GOLDEN_SET)
-    if args.which in ("capability", "both"):
+    if args.which in ("capability", "both", "all"):
         run_set("CAPABILITY - cross-document", CROSS_SET, bucket_fn=bucket)
+    if args.which in ("tesla", "all"):
+        run_set("TESLA - the sixth filing", TESLA_SET, bucket_fn=tesla_bucket)

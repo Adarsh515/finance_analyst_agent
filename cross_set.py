@@ -1,11 +1,18 @@
 """
 Cross-document eval set.
 
-Corpus as of 2026-08-13: NVIDIA FY2026 10-K, NVIDIA FY2025 10-K, AMD FY2025 10-K,
-Intel FY2025 10-K, NVIDIA Q3 FY2026 10-Q. (This docstring said "NVIDIA FY2026 + AMD
-FY2025" for a day after Intel was indexed - the same stale-assumption bug the
-questions themselves had. The authoritative list is corpus.py, and what actually
-landed is in the index; this line is a convenience and will rot again.)
+Corpus as of 2026-08-19: NVIDIA FY2026 10-K, NVIDIA FY2025 10-K, AMD FY2025 10-K,
+Intel FY2025 10-K, NVIDIA Q3 FY2026 10-Q, TESLA FY2025 10-K. (This docstring said
+"NVIDIA FY2026 + AMD FY2025" for a day after Intel was indexed - the same
+stale-assumption bug the questions themselves had. It rotted a second time when Tesla
+landed, exactly as predicted below. The authoritative list is corpus.py, and what
+actually landed is in the index; this line is a convenience and will rot again.)
+
+Tesla, added in Phase 6.8, is the first NON-chipmaker here and it broke four references
+outright rather than merely lengthening them: it employs more people than anyone else
+(134,785), has the lowest gross margin (18.0%), takes second place on revenue, and
+reports no Data Center segment at all. Adding a filing is one line in corpus.py and a
+re-derivation of every reference defined over the corpus - see PHASE_6_8_IMPACT.md.
 
 Same rules as golden_set.py - every reference_answer is HUMAN-verified against the
 filings. "companies" lists which filings an answer legitimately needs; "bucket", when
@@ -21,6 +28,9 @@ Period traps in this corpus:
     Different labels, nearly the same calendar year. Compare periods, not FY numbers.
   - AMD and Intel BOTH ended fiscal 2025 on Dec 27, 2025, so a period string is not
     unique - only the (company, period) pair is.
+  - Tesla's fiscal 2025 ended Dec 31, 2025 - FOUR DAYS after AMD's and Intel's, and in
+    the same calendar month. Close enough to be called "the same year end" by a careless
+    answer, and it is not. See p02 and t08, which test both sides of this.
   - NVIDIA fiscal 2025 appears twice: as its own filing and as the prior-year column
     inside the fiscal 2026 filing.
   - The Q3 FY2026 10-Q overlaps the FY2026 10-K and carries BOTH a three-month and a
@@ -148,8 +158,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "x18", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "Among the companies covered by these filings, which reported the highest total revenue in its most recent fiscal year, and by how much more than the next largest?",
-     "reference_answer": "NVIDIA, by $163,085 million more than Intel. NVIDIA's revenue was $215,938M (FY2026), Intel's $52,853M (FY2025), AMD's $34,639M (FY2025).",
-     "evidence": "NVIDIA income statement Revenue 215,938. Intel income statement Net revenue 52,853. AMD income statement Net revenue 34,639. 215,938-52,853 = 163,085.",
+     "reference_answer": "NVIDIA, by $121,111 million more than Tesla. NVIDIA's revenue was $215,938M (FY2026), Tesla's $94,827M (FY2025), Intel's $52,853M (FY2025), AMD's $34,639M (FY2025).",
+     "evidence": "NVIDIA income statement Revenue 215,938. Tesla income statement Total revenues 94,827. Intel income statement Net revenue 52,853. AMD income statement Net revenue 34,639. 215,938-94,827 = 121,111.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
     # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
@@ -158,8 +168,8 @@ CROSS_SET = [
     # reports it.
     {"id": "x19", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "Among the companies in these filings, which spent the most on research and development in its most recent fiscal year, and what were the figures?",
-     "reference_answer": "NVIDIA spent the most: $18,497 million, versus Intel's $13,774 million and AMD's $8,091 million.",
-     "evidence": "NVIDIA income statement R&D 18,497 (FY2026). Intel income statement R&D 13,774 (FY2025). AMD income statement R&D 8,091 (FY2025).",
+     "reference_answer": "NVIDIA spent the most: $18,497 million, versus Intel's $13,774 million, AMD's $8,091 million and Tesla's $6,411 million.",
+     "evidence": "NVIDIA income statement R&D 18,497 (FY2026). Intel income statement R&D 13,774 (FY2025). AMD income statement R&D 8,091 (FY2025). Tesla income statement R&D 6,411 (FY2025).",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
     # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
@@ -169,8 +179,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "x20", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "For the company with the highest revenue in these filings, what was its gross margin, and how does that compare with the lowest-revenue company's?",
-     "reference_answer": "The highest by revenue is NVIDIA, with a gross margin of about 71.1%, versus AMD's 50% - roughly 21 percentage points higher. AMD has the lowest revenue of the three.",
-     "evidence": "Revenue: NVIDIA 215,938 > Intel 52,853 > AMD 34,639. NVIDIA MD&A gross margin 71.1% (FY2026). AMD gross margin 50% (FY2025).",
+     "reference_answer": "The highest by revenue is NVIDIA, with a gross margin of about 71.1%, versus AMD's 50% - roughly 21 percentage points higher. AMD has the lowest revenue of the four.",
+     "evidence": "Revenue: NVIDIA 215,938 > Tesla 94,827 > Intel 52,853 > AMD 34,639. NVIDIA MD&A gross margin 71.1% (FY2026). AMD gross margin 50% (FY2025).",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
     # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
@@ -195,8 +205,8 @@ CROSS_SET = [
     # reports it.
     {"id": "x23", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "What was the combined net income attributable to shareholders of all the companies in these filings, in their most recent fiscal years?",
-     "reference_answer": "$124,135 million: NVIDIA's $120,067M (FY2026) plus AMD's $4,335M (FY2025) plus Intel's net LOSS attributable to Intel of $(267)M (FY2025). The fiscal years are not identical periods.",
-     "evidence": "NVIDIA net income 120,067. AMD net income 4,335. Intel net income (loss) attributable to Intel (267); Intel's total net income including non-controlling interests was 26, which is why the question specifies attributable to shareholders. 120,067+4,335-267 = 124,135.",
+     "reference_answer": "$127,929 million: NVIDIA's $120,067M (FY2026) plus Tesla's $3,794M (FY2025) plus AMD's $4,335M (FY2025) plus Intel's net LOSS attributable to Intel of $(267)M (FY2025). The fiscal years are not identical periods.",
+     "evidence": "NVIDIA net income 120,067. AMD net income 4,335. Intel net income (loss) attributable to Intel (267); Intel's total net income including non-controlling interests was 26, which is why the question specifies attributable to shareholders. Tesla net income attributable to common stockholders 3,794 (total net income 3,855 including noncontrolling interests). 120,067+3,794+4,335-267 = 127,929.",
      "difficulty": "hard", "section": "cross-company sum, sign trap", "answer_type": "number"},
 
     # Reworded 2026-08-13. Written when the corpus held exactly two companies, this
@@ -217,8 +227,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "x25", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "Which company employed the most people at fiscal year end, and roughly how many did each report?",
-     "reference_answer": "Intel, with 85,100 people as of December 27, 2025, ahead of NVIDIA's roughly 42,000 and AMD's approximately 31,000.",
-     "evidence": "Intel Human Capital: workforce of 85,100 people as of December 27, 2025. NVIDIA Item 1: 42,000 employees in 38 countries. AMD Item 1: approximately 31,000 employees.",
+     "reference_answer": "Tesla, with 134,785 people as of December 31, 2025, ahead of Intel's 85,100, NVIDIA's roughly 42,000 and AMD's approximately 31,000.",
+     "evidence": "Tesla Human Capital Resources: employee headcount worldwide was 134,785 as of December 31, 2025. Intel Human Capital: workforce of 85,100 people as of December 27, 2025. NVIDIA Item 1: 42,000 employees in 38 countries. AMD Item 1: approximately 31,000 employees.",
      "difficulty": "hard", "section": "cross-company implicit", "answer_type": "short-text"},
 
     # ===== E. Phase 4.0: questions the single-round pipeline should fail =====
@@ -235,8 +245,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "x27", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "Among the companies in these filings, whichever had the lowest gross margin - what percentage of its revenue did that company spend on research and development?",
-     "reference_answer": "Intel had the lowest gross margin (about 34.8%, versus AMD's 50% and NVIDIA's 71.1%), and Intel spent about 26.1% of its revenue on R&D ($13,774M of $52,853M).",
-     "evidence": "Intel gross profit 18,375 / net revenue 52,853 = 34.8%. AMD 50%, NVIDIA 71.1%. Intel R&D 13,774 / 52,853 = 26.1%.",
+     "reference_answer": "Tesla had the lowest gross margin (about 18.0%, versus Intel's 34.8%, AMD's 50% and NVIDIA's 71.1%), and Tesla spent about 6.8% of its revenue on R&D ($6,411M of $94,827M).",
+     "evidence": "Tesla gross profit 17,094 / total revenues 94,827 = 18.0%. Intel 18,375 / 52,853 = 34.8%. AMD 50%, NVIDIA 71.1%. Tesla R&D 6,411 / 94,827 = 6.8%.",
      "difficulty": "hard", "section": "cross-company multi-hop", "answer_type": "short-text"},
 
      {"id": "x28", "companies": ["NVIDIA", "AMD"],
@@ -251,8 +261,8 @@ CROSS_SET = [
     # reports it.
     {"id": "x29", "companies": ["NVIDIA", "AMD", "Intel"],
      "question": "Among the companies in these filings, which one leads on gross margin, which leads on R&D as a share of revenue, and which leads on cash generated from operations?",
-     "reference_answer": "NVIDIA leads on gross margin (71.1%, versus AMD 50% and Intel about 34.8%) and on operating cash flow ($102,718M, versus Intel $9,697M and AMD $7,709M). Intel leads on R&D as a share of revenue (about 26.1%, versus AMD 23.4% and NVIDIA 8.6%).",
-     "evidence": "Gross margin NVIDIA 71.1%, AMD 50%, Intel 18,375/52,853 = 34.8%. Operating cash flow NVIDIA 102,718, Intel 9,697, AMD 7,709. R&D share Intel 13,774/52,853 = 26.1%, AMD 8,091/34,639 = 23.4%, NVIDIA 18,497/215,938 = 8.6%.",
+     "reference_answer": "NVIDIA leads on gross margin (71.1%, versus AMD 50%, Intel about 34.8% and Tesla about 18.0%) and on operating cash flow ($102,718M, versus Tesla $14,747M, Intel $9,697M and AMD $7,709M). Intel leads on R&D as a share of revenue (about 26.1%, versus AMD 23.4%, NVIDIA 8.6% and Tesla 6.8%).",
+     "evidence": "Gross margin NVIDIA 71.1%, AMD 50%, Intel 18,375/52,853 = 34.8%, Tesla 17,094/94,827 = 18.0%. Operating cash flow NVIDIA 102,718, Tesla 14,747, Intel 9,697, AMD 7,709. R&D share Intel 13,774/52,853 = 26.1%, AMD 8,091/34,639 = 23.4%, NVIDIA 18,497/215,938 = 8.6%, Tesla 6,411/94,827 = 6.8%.",
      "difficulty": "hard", "section": "cross-company three-way", "answer_type": "short-text"},
 
     # Reworded 2026-08-13, same reason as the items above: it assumed a two-company
@@ -277,8 +287,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "d01", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
      "question": "Which company spent the largest share of its revenue on research and development, and by how many percentage points more than the next one?",
-     "reference_answer": "Intel, by about 2.7 percentage points. Intel spent 13,774/52,853 = 26.1%; AMD 8,091/34,639 = 23.4%; NVIDIA 18,497/215,938 = 8.6%.",
-     "evidence": "Intel R&D 13,774 on net revenue 52,853. AMD R&D 8,091 on net revenue 34,639. NVIDIA R&D 18,497 on revenue 215,938.",
+     "reference_answer": "Intel, by about 2.7 percentage points. Intel spent 13,774/52,853 = 26.1%; AMD 8,091/34,639 = 23.4%; NVIDIA 18,497/215,938 = 8.6%; Tesla 6,411/94,827 = 6.8%.",
+     "evidence": "Intel R&D 13,774 on net revenue 52,853. AMD R&D 8,091 on net revenue 34,639. NVIDIA R&D 18,497 on revenue 215,938. Tesla R&D 6,411 on total revenues 94,827.",
      "difficulty": "hard", "section": "derived ratio, all companies", "answer_type": "short-text"},
 
     # Reworded 2026-08-12. The first version asked about "four reportable segments", which is
@@ -303,12 +313,12 @@ CROSS_SET = [
     # reports it.
     {"id": "d03", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
      "question": "Using net income attributable to shareholders, what was each company's net profit margin, and what is the gap between the highest and the lowest in percentage points?",
-     "reference_answer": "NVIDIA 120,067/215,938 = 55.6%; AMD 4,335/34,639 = 12.5%; Intel -267/52,853 = about -0.5%. Gap between highest and lowest is about 56.1 percentage points.",
-     "evidence": "NVIDIA net income 120,067 on revenue 215,938. AMD net income 4,335 on net revenue 34,639. Intel net loss attributable to Intel (267) on net revenue 52,853 - a negative margin.",
+     "reference_answer": "NVIDIA 120,067/215,938 = 55.6%; AMD 4,335/34,639 = 12.5%; Tesla 3,794/94,827 = about 4.0%; Intel -267/52,853 = about -0.5%. Gap between highest and lowest is about 56.1 percentage points.",
+     "evidence": "NVIDIA net income 120,067 on revenue 215,938. AMD net income 4,335 on net revenue 34,639. Tesla net income attributable to common stockholders 3,794 on total revenues 94,827. Intel net loss attributable to Intel (267) on net revenue 52,853 - a negative margin. The gap is NVIDIA to Intel and Tesla does not touch either end.",
      "difficulty": "hard", "section": "derived ratio, all companies, sign trap", "answer_type": "short-text"},
 
     {"id": "d04", "companies": ["NVIDIA", "AMD"], "derived": True,
-     "question": "What were total liabilities as a percentage of total assets for each company, and which was lower?",
+     "question": "What were total liabilities as a percentage of total assets for NVIDIA and for AMD, and which was lower?",
      "reference_answer": "AMD was lower, by about 5.8 percentage points. NVIDIA 49,510/206,803 = 23.9%. "
                          "AMD has no 'Total liabilities' line, so it must be derived: 76,926 - 62,999 = 13,927; "
                          "13,927/76,926 = 18.1%.",
@@ -316,7 +326,7 @@ CROSS_SET = [
      "difficulty": "hard", "section": "derived ratio requiring a derived input", "answer_type": "short-text"},
 
     {"id": "d05", "companies": ["NVIDIA", "AMD"], "derived": True,
-     "question": "What share of each company's total revenue came from its Data Center segment?",
+     "question": "What share of total revenue came from the Data Center segment for NVIDIA and for AMD?",
      "reference_answer": "NVIDIA 193,737/215,938 = about 89.7%. AMD 16,635/34,639 = about 48.0%.",
      "evidence": "NVIDIA Data Center 193,737 of revenue 215,938. AMD Data Center 16,635 of net revenue 34,639.",
      "difficulty": "hard", "section": "segment share, both companies", "answer_type": "short-text"},
@@ -340,8 +350,8 @@ CROSS_SET = [
     # true answer genuinely changed.
     {"id": "d08", "companies": ["NVIDIA", "AMD", "Intel"], "derived": True,
      "question": "What is the combined revenue of all the companies in these filings for their latest fiscal years, and what share of that combined figure is AMD's?",
-     "reference_answer": "$303,430 million combined (215,938 + 52,853 + 34,639). AMD's share is about 11.4% (34,639 / 303,430).",
-     "evidence": "NVIDIA revenue 215,938 (FY2026). Intel net revenue 52,853 (FY2025). AMD net revenue 34,639 (FY2025).",
+     "reference_answer": "$398,257 million combined (215,938 + 94,827 + 52,853 + 34,639). AMD's share is about 8.7% (34,639 / 398,257).",
+     "evidence": "NVIDIA revenue 215,938 (FY2026). Tesla total revenues 94,827 (FY2025). Intel net revenue 52,853 (FY2025). AMD net revenue 34,639 (FY2025).",
      "difficulty": "hard", "section": "sum then ratio", "answer_type": "short-text"},
 
     {"id": "d09", "companies": ["AMD"], "derived": True,
@@ -385,27 +395,27 @@ CROSS_SET = [
     # --- three-way comparison: stresses job count, and MAX_JOBS for the first time ---
     {"id": "w01", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
      "question": "Rank all the companies in these filings by total revenue in their most recent fiscal years, with the figures.",
-     "reference_answer": "NVIDIA $215,938M (FY2026), then Intel $52,853M (FY2025), then AMD $34,639M (FY2025).",
-     "evidence": "NVIDIA revenue 215,938. Intel net revenue 52,853. AMD net revenue 34,639.",
+     "reference_answer": "NVIDIA $215,938M (FY2026), then Tesla $94,827M (FY2025), then Intel $52,853M (FY2025), then AMD $34,639M (FY2025).",
+     "evidence": "NVIDIA revenue 215,938. Tesla total revenues 94,827. Intel net revenue 52,853. AMD net revenue 34,639.",
      "difficulty": "hard", "section": "three-way", "answer_type": "short-text"},
 
     {"id": "w02", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
      "question": "Which company reported the largest total assets, and how does that ranking compare with the revenue ranking?",
-     "reference_answer": "Intel, with total assets of $211,429 million, slightly ahead of NVIDIA's $206,803 million and well ahead of AMD's $76,926 million. That inverts the revenue ranking, where NVIDIA is far ahead of Intel.",
-     "evidence": "Intel total assets 211,429. NVIDIA total assets 206,803. AMD total assets 76,926. Revenue: NVIDIA 215,938 > Intel 52,853 > AMD 34,639.",
+     "reference_answer": "Intel, with total assets of $211,429 million, slightly ahead of NVIDIA's $206,803 million, then Tesla's $137,806 million and AMD's $76,926 million. That inverts the top of the revenue ranking, where NVIDIA is far ahead and Intel is only third.",
+     "evidence": "Intel total assets 211,429. NVIDIA total assets 206,803. Tesla total assets 137,806. AMD total assets 76,926. Revenue: NVIDIA 215,938 > Tesla 94,827 > Intel 52,853 > AMD 34,639.",
      "difficulty": "hard", "section": "three-way, counterintuitive", "answer_type": "short-text"},
 
     {"id": "w03", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "three-way",
      "question": "Rank all the companies in these filings by cash generated from operating activities, with the figures.",
-     "reference_answer": "NVIDIA $102,718M, then Intel $9,697M, then AMD $7,709M.",
-     "evidence": "NVIDIA cash flow statement 102,718. Intel cash flow statement 9,697. AMD cash flow statement 7,709.",
+     "reference_answer": "NVIDIA $102,718M, then Tesla $14,747M, then Intel $9,697M, then AMD $7,709M.",
+     "evidence": "NVIDIA cash flow statement 102,718. Tesla cash flow statement 14,747. Intel cash flow statement 9,697. AMD cash flow statement 7,709.",
      "difficulty": "hard", "section": "three-way", "answer_type": "short-text"},
 
     # --- red flags: the question type that makes this a compliance tool, not a lookup ---
     {"id": "r01", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
      "question": "Which company generated LESS cash from operations than the net income it reported, and what were the two figures?",
-     "reference_answer": "NVIDIA: operating cash flow of $102,718 million against net income of $120,067 million, a shortfall of $17,349 million. AMD and Intel both generated more operating cash than net income.",
-     "evidence": "NVIDIA OCF 102,718 vs net income 120,067. AMD OCF 7,709 vs net income 4,335. Intel OCF 9,697 vs net income 26 including non-controlling interests.",
+     "reference_answer": "NVIDIA: operating cash flow of $102,718 million against net income of $120,067 million, a shortfall of $17,349 million. AMD, Intel and Tesla all generated more operating cash than net income.",
+     "evidence": "NVIDIA OCF 102,718 vs net income 120,067. AMD OCF 7,709 vs net income 4,335. Intel OCF 9,697 vs net income 26 including non-controlling interests. Tesla OCF 14,747 vs net income 3,855.",
      "difficulty": "hard", "section": "red-flag", "answer_type": "short-text"},
 
     {"id": "r02", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
@@ -415,9 +425,9 @@ CROSS_SET = [
      "difficulty": "hard", "section": "red-flag, sign trap", "answer_type": "short-text"},
 
     {"id": "r03", "companies": ["NVIDIA", "AMD", "Intel"], "bucket": "red-flag",
-     "question": "For which company does reported net income depend on whether non-controlling interests are included, and by how much do the two figures differ?",
+     "question": "For which company does the SIGN of reported net income - profit versus loss - depend on whether non-controlling interests are included, and by how much do the two figures differ?",
      "reference_answer": "Intel: net income of $26 million including non-controlling interests, versus a net LOSS of $(267) million attributable to Intel - a difference of $293 million.",
-     "evidence": "Intel income statement: net income (loss) 26; net income (loss) attributable to Intel (267). 26-(-267) = 293.",
+     "evidence": "Intel income statement: net income (loss) 26; net income (loss) attributable to Intel (267). 26-(-267) = 293 - a profit including NCI, a loss without it. Tesla also reports both figures (net income 3,855; attributable to common stockholders 3,794, a difference of 61) but both are profits, so the SIGN does not depend on it. That is why this question says sign: before Tesla was indexed it could say 'depend' and still have one answer.",
      "difficulty": "hard", "section": "red-flag, definition trap", "answer_type": "short-text"},
 
     # --- duplicate source: the same fact printed in two filings ---

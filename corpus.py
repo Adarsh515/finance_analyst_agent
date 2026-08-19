@@ -37,6 +37,25 @@ DOCS = [
      "doc_type": "10-K",
      "period": "fiscal year 2025 (ended December 27, 2025)"},
 
+    # Phase 6.8. The first NON-chipmaker, added because the learner asked a Tesla question and
+    # got a correct, useless "Not stated in the filing." The alternative on the table was to let
+    # the model answer from its own training memory; that was offered and declined, and it stays
+    # declined - a compliance tool that recalls a figure it cannot show you a page for is the
+    # failure mode this whole project exists to prevent.
+    #
+    # Two things about this filing that are NOT like the others, both load-bearing:
+    #   - its fiscal year ends 31 December 2025, while Intel's and AMD's both end 27 December.
+    #     `p02` asks which two companies share a year-end date; Tesla joining does NOT break it,
+    #     and that was checked against the cover page rather than assumed.
+    #   - its balance sheet STATES "Total liabilities" ($54,941M). AMD's does not, which is why
+    #     `d04` has to derive AMD's. Two documents, two shapes, one question - which is exactly
+    #     the kind of variety a five-filing corpus of near-identical chipmakers could not test.
+    {"slug": "tesla-fy2025",
+     "path": "data/tesla_10k_fy2025.htm",
+     "company": "Tesla",
+     "doc_type": "10-K",
+     "period": "fiscal year 2025 (ended December 31, 2025)"},
+
     # The first quarterly filing, held back one wave so it did not land in the same
     # measurement as the third company. It overlaps the FY2026 10-K on purpose: its
     # income statement carries BOTH a three-month and a nine-month column for a period
