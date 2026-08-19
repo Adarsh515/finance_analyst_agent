@@ -777,7 +777,12 @@ def run_agent(question: str, history=None) -> dict:
     With history, ONE call happens before the graph and the graph then receives a standalone
     question, exactly as it always has.
     """
-    rewritten, rewrite_note = rewriter.rewrite(question, history)
+    # FILINGS is passed so the rewriter can refuse to name a fiscal year later than any
+    # filing this corpus holds for that company - the defect that turned "And Tesla?"
+    # after an NVIDIA fiscal-2026 question into an unanswerable "Tesla ... fiscal year
+    # 2026". It is an argument rather than an import because rewriter cannot import this
+    # module: this module imports it.
+    rewritten, rewrite_note = rewriter.rewrite(question, history, filings=FILINGS)
     initial: AgentState = {
         "question": rewritten,
         "jobs": [],

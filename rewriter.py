@@ -162,7 +162,100 @@ def _clean(raw, fallback):
     return line, None
 
 
-def rewrite(question, history):
+_YEAR_PHRASE = re.compile(
+    r"\s*(?:,\s*)?(?:for|in|during|as of|at the end of)?\s*"
+    r"(?:the\s+)?(?:full\s+)?(?:fiscal\s+(?:year\s+)?|FY\s*)(\d{4})\b", re.I)
+
+
+def latest_year_by_company(filings):
+    """company -> the newest fiscal year this corpus actually has a FILING for.
+
+    `filings` is agent.FILINGS: [(company, "fiscal year 2026 (ended January 25, 2026)"), ...]
+    A 10-Q's period reads "third quarter of fiscal year 2026 (...)", so the year is taken from
+    wherever "fiscal year NNNN" appears rather than from the start of the string.
+    """
+    latest = {}
+    for company, period in filings or ():
+        m = re.search(r"fiscal\s+year\s+(\d{4})", period or "", re.I)
+        if m:
+            y = int(m.group(1))
+            latest[company] = max(latest.get(company, 0), y)
+    return latest
+
+
+def drop_future_period(text, filings):
+    """Remove a fiscal year that is LATER than any filing this corpus holds for that company.
+
+    THE BUG THIS EXISTS FOR, measured in the product on 2026-08-19. Asked "What was NVIDIA's
+    total revenue for fiscal year 2026?" and then "And Tesla?", the rewriter produced
+
+        What was Tesla's total revenue for fiscal year 2026?
+
+    Tesla's most recent filing is fiscal 2025. The question names a document that does not
+    exist, so the answer came back "Not stated in the filing." for a figure the corpus holds.
+    Carrying the metric is right; carrying the PERIOD across a company boundary is not.
+
+    WHY ONLY FUTURE YEARS, and this is the part a naive fix gets wrong. The first design was
+    "drop the period if (company, period) is not a filing we hold" - and that would have
+    stripped `rw10`, "AMD's total revenue for fiscal year 2024". AMD has no fiscal 2024
+    FILING, but its fiscal 2025 10-K carries fiscal 2024 as the prior-year column, so the data
+    is there and the question is answerable. A filing's label describes the DOCUMENT, not the
+    data inside it. A year in the PAST may be a comparison column; a year in the FUTURE cannot
+    be anything. Only the second is removed.
+
+    THE LLM SUGGESTS, THE CODE DECIDES - the same division plan_node already uses when it
+    validates a (company, period) pair. A prompt instruction here would be a request; this is
+    a rule.
+
+    Conservative in two more ways, both deliberate:
+      - it acts only when EXACTLY ONE company is named. "Compare NVIDIA and AMD in 2026" has
+        no single owner for the year, and guessing one is worse than leaving it alone.
+      - it removes the period and nothing else. The company and the metric are untouched, so
+        the pipeline still gets a real question and picks the period itself.
+    """
+    if not filings or not text:
+        return text, None
+
+    # Companies come from the FILINGS that were handed in, not from rag.detect_companies.
+    # Two reasons, and the second one is why this was rewritten: the names are already in the
+    # argument, so asking another module for them is a dependency bought for nothing - and
+    # detect_companies reads COMPANY_ALIASES, which is derived from the live index, so the
+    # first version of this function could not be tested at all without a built index. A rule
+    # this important should be checkable for free. rag's aliases are still consulted when they
+    # are available, so an alias the corpus list does not spell still resolves.
+    low = text.lower()
+    companies = {c for c, _p in filings
+                 if re.search(rf"\b{re.escape(c.lower())}\b", low)}
+    try:
+        from rag import detect_companies
+        companies |= set(detect_companies(text))
+    except Exception:
+        pass
+
+    if len(companies) != 1:
+        return text, None
+    company = next(iter(companies))
+
+    latest = latest_year_by_company(filings).get(company)
+    if latest is None:
+        return text, None
+
+    out, removed = text, []
+    for m in list(_YEAR_PHRASE.finditer(text)):
+        if int(m.group(1)) > latest:
+            removed.append(m.group(1))
+            out = out.replace(m.group(0), "", 1)
+    if not removed:
+        return text, None
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    out = re.sub(r"\s+([?.!])", r"\1", out)
+    if not out.endswith("?"):
+        out = out.rstrip(".") + "?"
+    return out, (f"dropped future period {removed} - {company}'s latest filing is "
+                 f"fiscal year {latest}")
+
+
+def rewrite(question, history, filings=None):
     """Return (standalone_question, note). No history means no call and no cost.
 
     `note` is None when the rewrite was used, or a string naming why the original was kept.
@@ -186,6 +279,13 @@ def rewrite(question, history):
     resp = BASE_LLM.invoke(REWRITE_PROMPT.format(history=block, question=question))
     log_cost("gemini-3.1-flash-lite", resp, label="agent-rewrite")
     out, note = _clean(to_text(resp.content), question)
+    # After the model, before the caller. `filings` is passed in rather than imported because
+    # agent.py imports THIS module - reaching back for agent.FILINGS would be a cycle. Default
+    # None means "no corpus knowledge", which is byte-for-byte the pre-6.8 behaviour, so a
+    # caller that does not pass it is not silently changed.
+    out, pnote = drop_future_period(out, filings)
+    if pnote:
+        note = f"{pnote}" + (f"; {note}" if note else "")
     if dropped:
         why = sorted({h for _r, _c, hits in dropped for h in hits})
         note = (f"history-guard: dropped {len(dropped)} turn(s) {why}"
@@ -274,6 +374,51 @@ if __name__ == "__main__":
     assert not is_acknowledgement("aur AMD ka?")
     assert not is_acknowledgement("And what was its net income?")
     assert not is_acknowledgement("no revenue growth in 2026?")
+    ok += 1
+
+    # --- Phase 6.8: the future-period rule, checked for free -------------------------------
+    # This is a CODE rule, not a prompt instruction, so it is testable without a model and
+    # without an index - which is the whole reason drop_future_period() takes the filings as
+    # an argument instead of reading rag's index-derived alias table. The first version did
+    # read it, and could not be tested at all on a machine with no index built.
+    _F = [("NVIDIA", "fiscal year 2026 (ended January 25, 2026)"),
+          ("NVIDIA", "fiscal year 2025 (ended January 26, 2025)"),
+          ("NVIDIA", "third quarter of fiscal year 2026 (ended October 26, 2025)"),
+          ("AMD", "fiscal year 2025 (ended December 27, 2025)"),
+          ("Intel", "fiscal year 2025 (ended December 27, 2025)"),
+          ("Tesla", "fiscal year 2025 (ended December 31, 2025)")]
+    assert latest_year_by_company(_F) == {"NVIDIA": 2026, "AMD": 2025,
+                                          "Intel": 2025, "Tesla": 2025}
+    ok += 1
+
+    # a year AFTER the company's newest filing is removed - the live defect
+    for q in ("What was Tesla's total revenue for fiscal year 2026?",
+              "What was AMD's total revenue for fiscal year 2026?",
+              "What was Intel's total revenue for FY2027?",
+              "How many people did Tesla employ in fiscal 2026?"):
+        out, note = drop_future_period(q, _F)
+        assert out != q and "dropped future period" in note, (q, out)
+        assert out.endswith("?") and "  " not in out, out
+    ok += 1
+
+    # ...and a year the company DOES have, or one in its past, is left alone. Without these
+    # the rule degenerates into "strip every period", which passes the four above and breaks
+    # rw09, rw11 and rw25.
+    for q in ("What was NVIDIA's net income for fiscal year 2026?",        # its newest filing
+              "What was NVIDIA's total revenue for fiscal year 2025?",     # an older filing
+              "What was AMD's total revenue for fiscal year 2024?",        # prior-year COLUMN
+              "What was NVIDIA's revenue for the full fiscal year 2026?",
+              "What was Tesla's total revenue?"):                          # no year at all
+        out, note = drop_future_period(q, _F)
+        assert out == q and note is None, (q, out, note)
+    ok += 1
+
+    # two companies named: nobody owns the year, so nothing is touched
+    q = "Compare NVIDIA and AMD gross margin for fiscal year 2026."
+    assert drop_future_period(q, _F) == (q, None)
+    # and with no filings passed, the behaviour is exactly what it was before 6.8
+    assert drop_future_period("What was Tesla's revenue for fiscal year 2026?", None)[0] \
+        == "What was Tesla's revenue for fiscal year 2026?"
     ok += 1
 
     print(f"rewriter.py self-test: {ok}/{ok} bound checks passed, $0.00 spent")

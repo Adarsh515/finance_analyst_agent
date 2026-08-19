@@ -216,6 +216,48 @@ REWRITE_SET = [
             "answer they already have. The item originally asserted nothing and scored it as "
             "a pass. Fixed in CODE (rewriter.is_acknowledgement), not in the prompt, so the "
             "right answer is now exact: the message comes back unchanged."},
+
+    # --- Phase 6.8: a period that does not exist for the company being switched to ----------
+    # THE LIVE DEFECT THIS SET COULD NOT SEE. rw05 already covers "And AMD?" after an NVIDIA
+    # fiscal-2026 question, and it checks that AMD REPLACES NVIDIA - but it never looked at the
+    # PERIOD, so "AMD's revenue for fiscal year 2026" has passed it for four phases. AMD has no
+    # fiscal 2026 filing. Neither does Tesla.
+    #
+    # Before Tesla was indexed this cost nothing: the answer was a refusal either way, and the
+    # tracker recorded carrying the period as faithful-but-limited. With Tesla in the corpus
+    # the SAME rewrite turns a question the filings CAN answer into "Not stated in the filing."
+    # Measured live in the product on 2026-08-19, not inferred.
+    {"id": "rw23", "bucket": "period",
+     "history": [U("What was NVIDIA's total revenue for fiscal year 2026?"),
+                 A("NVIDIA's total revenue for fiscal year 2026 was $215,938 million.")],
+     "question": "And Tesla?",
+     "must_have": ["tesla", "revenue"], "must_not": ["nvidia", "2026"],
+     "why": "the company replaces AND the period must not follow it - Tesla's fiscal year is "
+            "2025, so 'Tesla ... fiscal year 2026' names a filing that does not exist and "
+            "refuses a question the corpus can answer"},
+
+    {"id": "rw24", "bucket": "period",
+     "history": [U("What was NVIDIA's total revenue for fiscal year 2026?"),
+                 A("NVIDIA's total revenue for fiscal year 2026 was $215,938 million.")],
+     "question": "And AMD?",
+     "must_have": ["amd", "revenue"], "must_not": ["nvidia", "2026"],
+     "why": "rw05 with its blind spot closed. rw05 passes as long as AMD replaces NVIDIA and "
+            "never noticed the carried fiscal 2026; AMD's fiscal 2025 is the only AMD filing "
+            "in this corpus"},
+
+    # 🔑 THE CONTROL ARM. Without this item, "drop every period" passes rw23 and rw24 and looks
+    # like a fix. It is not: NVIDIA DOES have a fiscal 2026 filing, so here the period must be
+    # CARRIED. The pair is what is legal or illegal, never the period on its own - the same
+    # rule plan_node already enforces in code, and the same reason the timing test in 6.2
+    # needed a known-vs-known arm before its ratio meant anything.
+    {"id": "rw25", "bucket": "period",
+     "history": [U("What was NVIDIA's total revenue for fiscal year 2026?"),
+                 A("NVIDIA's total revenue for fiscal year 2026 was $215,938 million.")],
+     "question": "And what was its net income?",
+     "must_have": ["nvidia", "net income", "2026"], "must_not": [],
+     "why": "CONTROL for rw23/rw24: the period must survive when the company genuinely has "
+            "that filing. A fix that strips periods indiscriminately passes those two and "
+            "breaks this one"},
 ]
 
 BUCKETS = sorted({i["bucket"] for i in REWRITE_SET})

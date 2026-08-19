@@ -26,6 +26,8 @@ import time
 
 from dotenv import load_dotenv
 
+import agent          # for FILINGS only - the rewriter needs to know which fiscal
+                      # years the corpus actually holds, or it will name one it does not
 import judges
 import rag
 import rewriter
@@ -83,7 +85,12 @@ if __name__ == "__main__":
         t0 = time.perf_counter()
         with telemetry.capture() as calls:
             try:
-                out, note = rewriter.rewrite(item["question"], item["history"])
+                # The eval measures the SHIPPED rewriter, so it gets the same corpus
+                # knowledge the product gives it. Without this, rw23 and rw24 would keep
+                # failing here while passing in the app - a harness measuring a system
+                # nobody runs.
+                out, note = rewriter.rewrite(item["question"], item["history"],
+                                             filings=agent.FILINGS)
                 err = None
             except Exception as e:                       # infra, not a rewrite failure
                 out, note, err = item["question"], "ERROR", f"{type(e).__name__}: {e}"
@@ -143,6 +150,14 @@ if __name__ == "__main__":
     # untrue about two of them: rw22 was listed as "the cleaner rejected the model's output"
     # when in fact no model was called at all. A report that misattributes a cause sends the
     # next hour to the wrong file.
+    #
+    # 🔴 AND IT HAPPENED AGAIN, in Phase 6.8, for the same structural reason. The fix above
+    # named two cases and left a CATCH-ALL that assumed everything else was a cleaner
+    # rejection. When drop_future_period() started returning a note, rw05, rw21, rw23 and rw24
+    # were all reported as "the cleaner rejected the model's output and kept the original" -
+    # untrue: the rewrite happened and was used, and only a future fiscal year was removed
+    # from it. A default branch that ASSERTS a cause is a misattribution waiting for the next
+    # note to be added. Unrecognised notes are now reported as unrecognised.
     def _note_kind(note):
         if not note:
             return None
@@ -150,9 +165,14 @@ if __name__ == "__main__":
             return "short-circuited before the model (no call, no cost)"
         if note.startswith("history-guard"):
             return "the history guard dropped a turn"
+        if note.startswith("dropped future period"):
+            return ("a fiscal year later than that company's newest filing was removed "
+                    "(the rewrite itself was used)")
+        if note.startswith(("empty", "too long")):
+            return "the cleaner rejected the model's output and kept the original"
         if note == "no-history":
             return None
-        return "the cleaner rejected the model's output and kept the original"
+        return f"UNCLASSIFIED note - add it to _note_kind: {note[:60]!r}"
 
     kinds = {}
     for r in results:

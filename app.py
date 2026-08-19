@@ -478,7 +478,8 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     import time
     t0 = time.perf_counter()
     with telemetry.capture() as calls:
-        asked, rewrite_note = rewriter.rewrite(question, history)
+        asked, rewrite_note = rewriter.rewrite(question, history,
+                                               filings=agent.FILINGS)
         rewritten = asked if history else None
 
         hit = cache.get(conn, asked, CACHE_FINGERPRINT) if CACHE_ENABLED else None

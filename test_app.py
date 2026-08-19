@@ -77,7 +77,10 @@ def main():
     # The rewriter is stubbed too, and for the same reason the agent is: this suite must cost
     # nothing. Before /ask passed history it never called the rewriter, so this was not needed
     # - which is itself a small sign that the wiring was missing.
-    appmod.rewriter.rewrite = lambda q, h: ((q, "no-history") if not h
+    # **kw, not (q, h): rewrite() gained `filings` in 6.8 and a stub with a frozen signature
+    # fails as a TypeError inside the endpoint, which surfaces as a 500 and reads like a
+    # server bug. A stub should track the thing it stands in for.
+    appmod.rewriter.rewrite = lambda q, h, **kw: ((q, "no-history") if not h
                                             else ("STANDALONE: " + q, None))
     client = TestClient(appmod.app)
     ok = 0
@@ -389,7 +392,7 @@ def main():
 
     seen_rewrites = []
 
-    def fake_rewrite(question, history):
+    def fake_rewrite(question, history, **kw):
         seen_rewrites.append((question, list(history or [])))
         if not history:
             return question, "no-history"

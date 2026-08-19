@@ -41,8 +41,8 @@ def main():
     import test_app as T
 
     appmod.agent.run_agent = T.fake_run_agent
-    appmod.rewriter.rewrite = lambda q, h: ((q, "no-history") if not h
-                                            else ("STANDALONE: " + q, None))
+    appmod.rewriter.rewrite = lambda q, h, **kw: ((q, "no-history") if not h
+                                                  else ("STANDALONE: " + q, None))
 
     server = uvicorn.Server(uvicorn.Config(appmod.app, host="127.0.0.1", port=PORT,
                                            log_level="error"))
