@@ -4,8 +4,12 @@ Every expected figure below is taken from `golden_set.py` / `cross_set.py`, whic
 against the filings. None of it is written from memory — that mistake was made once in this
 project and cost a defective control item.
 
-**Corpus:** NVIDIA FY2026 10-K, NVIDIA FY2025 10-K, NVIDIA Q3 FY2026 10-Q, AMD FY2025 10-K,
-Intel FY2025 10-K.
+**Corpus (six filings, since Phase 6.8):** NVIDIA FY2026 10-K, NVIDIA FY2025 10-K,
+NVIDIA Q3 FY2026 10-Q, AMD FY2025 10-K, Intel FY2025 10-K, **Tesla FY2025 10-K**.
+
+Tesla is the first non-chipmaker here and it changes several answers below: it is **second by
+revenue**, it employs **more people than anyone else**, it has the **lowest gross margin**, and
+it reports **no Data Center segment at all**.
 
 **Cost:** roughly **Rs 0.05 per new question**. A cache hit costs **Rs 0**. Total for all six
 scripts is under Rs 2.
@@ -25,11 +29,17 @@ Open the trace panel under an answer to see sources, pipeline, tokens and cost.
 | 4 | `And the previous year for NVIDIA?` | FY2025 net income **$72,880M** | the period moves, the company stays |
 | 5 | `ok` | nothing happens, no cost | the acknowledgement short-circuit — **no model call at all** |
 
-**Watch turn 3 closely.** The rewriter may carry *fiscal year 2026* onto AMD, and AMD's only
-filing is FY2025 — so you may get a refusal instead of $4,335M. That is a **known limitation
-written in the tracker**, not a surprise: the rewriter has no corpus list, so carrying the
-period is faithful, and a refusal is the safe way to be wrong. If it happens, open the trace
-and read the rewritten question — that is the whole story in one line.
+**Watch turn 3 closely — and this paragraph used to say the opposite.** Until 2026-08-19 the
+rewriter carried *fiscal year 2026* onto AMD, whose only filing is FY2025, and you would get a
+refusal instead of $4,335M. Phase 6.8b fixed it in CODE: if a question names one company and a
+fiscal year **later than any filing that company has**, the year is dropped and the rest is
+left alone. Open the trace on turn 3 and the rewrite note reads *"dropped future period
+['2026'] — AMD's latest filing is fiscal year 2025"*.
+
+Worth saying out loud in a demo: the year is dropped only when it is in the **future** for that
+company. Ask about *AMD fiscal 2024* and the year survives, because AMD's FY2025 10-K carries
+FY2024 as its prior-year column. A filing's label describes the document, not the data inside
+it.
 
 ---
 
@@ -51,8 +61,8 @@ Turn 3 is the interesting one: the share flips the ranking. NVIDIA spends **more
 
 | # | Type this | Expect | What it proves |
 |---|---|---|---|
-| 1 | `Rank all the companies in these filings by total revenue, latest fiscal year each.` | NVIDIA **$215,938M**, Intel **$52,853M**, AMD **$34,639M** | three filings, one ranking |
-| 2 | `Does the total assets ranking match that?` | **No** — Intel leads with **$211,429M**, then NVIDIA $206,803M, then AMD $76,926M | back-reference to a ranking; the answer is a contradiction |
+| 1 | `Rank all the companies in these filings by total revenue, latest fiscal year each.` | NVIDIA **$215,938M**, Tesla **$94,827M**, Intel **$52,853M**, AMD **$34,639M** | four companies, one ranking |
+| 2 | `Does the total assets ranking match that?` | **No** — Intel leads with **$211,429M**, then NVIDIA $206,803M, then Tesla $137,806M, then AMD $76,926M | back-reference to a ranking; the answer is a contradiction |
 | 3 | `Which of them reported an income tax benefit rather than an expense?` | **AMD**, a benefit of **$(103)M** | a needle across three filings |
 | 4 | `What were that company's total liabilities?` | **$13,927M** | *that company* — and AMD's balance sheet has **no total-liabilities line**, so it must be derived as 76,926 − 62,999 |
 | 5 | `What will NVIDIA's revenue be in fiscal 2027?` | **a refusal** — not stated in the filings | the boundary: it must not guess |
@@ -116,6 +126,38 @@ The token never reaches you; the trace shows `token:['ZQ7-PWNED-4413']`.
 Turn 3 is the one that shows the period trap is handled. Every 10-K carries the prior year as
 a comparison column, which is exactly why a wrong-year answer returns a **real** number rather
 than an obvious error — the most dangerous failure this corpus can produce.
+
+---
+
+## Script G — the sixth filing 🔵 the one that shows the corpus can grow
+
+| # | Type this | Expect | What it proves |
+|---|---|---|---|
+| 1 | `What was NVIDIA's total revenue for fiscal year 2026?` | **$215,938M** | a cold baseline turn |
+| 2 | `And Tesla?` | **$94,827M** (FY2025) | 🔴 **this returned a refusal until 2026-08-19.** The rewriter carried *fiscal year 2026* onto Tesla, whose newest filing is FY2025 |
+| 3 | `Which company employed more people at year end, Tesla or Intel?` | **Tesla, 134,785** against Intel's 85,100 | a superlative that a five-filing corpus answered differently |
+| 4 | `What share of Tesla's revenue came from its Data Center segment?` | **a refusal** — Tesla has no such segment | the attractive nuisance, below |
+| 5 | `What were Tesla's total liabilities?` | **$54,941M**, stated on the balance sheet | the same question AMD's filing cannot answer directly |
+
+**Turn 2 is the demo.** Open the trace: the rewrite note reads *"dropped future period ['2026']
+— Tesla's latest filing is fiscal year 2025"*. That rule is in CODE, not in the prompt, and it
+only removes a year that is in the **future** for that company — a past year may be a
+prior-year comparison column and must survive. Two `rewrite_set` items check the removal and a
+third, `rw25`, checks that NVIDIA's own fiscal 2026 is **kept**.
+
+**Turn 4 is the one to linger on.** Tesla's 10-K says *"data centers"* **seven times** — in risk
+factors, in capital-expenditure guidance, in what R&D expense is made of, in the lease note.
+None of it is revenue: Tesla reports exactly two segments, automotive and energy generation and
+storage. A system that pattern-matches the phrase will find plenty of text and invent a share.
+The correct answer is that the segment does not exist, and `ts04` in `tesla_set.py` exists to
+keep it that way.
+
+**Turn 5 pairs with `d04`.** Tesla's balance sheet prints *Total liabilities $54,941M*. AMD's
+does not print that line at all, so AMD's has to be derived as $76,926M − $62,999M = $13,927M.
+Same question, two document shapes — the kind of variety five near-identical chipmakers could
+not test.
+
+*(Ask turn 2 again to see the cache: `served from cache · free · saved $0.000…`)*
 
 ---
 
