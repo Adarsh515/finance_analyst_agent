@@ -44,10 +44,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
 import judges
+import judges_coverage
 import judges_rubric
 import judges_scope
 import rag
 from judges import correctness_judge, groundedness_judge
+from judges_coverage import coverage_judge
 from judges_rubric import rubric_judge
 from judges_scope import scope_judge
 from golden_set import GOLDEN_SET
@@ -118,6 +120,13 @@ parser.add_argument("--no-extra", action="store_true",
                          "default deliberately: a scoreboard you have to remember to "
                          "switch on is a scoreboard that will be missing from the run that "
                          "mattered.")
+parser.add_argument("--no-coverage", action="store_true",
+                    help="skip the Phase 6.10b set-coverage scoreboard. ON by default, same "
+                         "argument as --no-extra: the 6.10 gate passed three answers on every "
+                         "existing scoreboard that had ranked over a set they never covered, "
+                         "and a scoreboard nobody remembers to switch on would have missed "
+                         "them again. Costs about Rs 3 on a 102-question gate, and only the "
+                         "questions that rank over a set are counted in its denominator.")
 
 
 # --- refuse to append to an existing --out file ------------------------------
@@ -144,6 +153,7 @@ def _guard_out_path(path, append):
 args = parser.parse_args()
 _guard_out_path(args.out, args.append)
 EXTRA = not args.no_extra
+COVERAGE = not args.no_coverage
 
 if args.agent:
     import agent
@@ -156,12 +166,13 @@ if args.agent:
     # Leaving it out would drop every rewrite call from the token count - the exact silent
     # undercount this install() was written to prevent, reappearing the moment a new module
     # joins the paid path.
-    _patched = telemetry.install(judges, rag, agent, rewriter, judges_rubric, judges_scope)
+    _patched = telemetry.install(judges, rag, agent, rewriter, judges_rubric, judges_scope,
+                                 judges_coverage)
 else:
     import rag as _rag_mod
     answer_fn = _rag_mod.answer_question
     PATH_NAME = "BASELINE (rag.answer_question)"
-    _patched = telemetry.install(judges, rag, judges_rubric, judges_scope)
+    _patched = telemetry.install(judges, rag, judges_rubric, judges_scope, judges_coverage)
 
 # A metric that silently measures nothing is worse than no metric. If the wrapper failed to
 # reach a module, say so now and loudly, not after a 25-minute run reports 0 tokens.
@@ -226,6 +237,18 @@ def score_one(ex):
                                reference=ex["reference_answer"])
         if EXTRA:
             sc = scope_judge(question=ex["question"], prediction=ans, context=out["context"])
+        # A THIRD axis, added 6.10b, and it answers a question neither of the two above can.
+        # Both of them ask "is this claim supported?" - so an answer that names a winner over
+        # a set it never covered is grounded, because every sentence in it is traceable. This
+        # one asks "was the set you compared over complete?" It is NOT part of any AND and is
+        # never averaged in: it can flag an answer that is correct and grounded, and on the
+        # 6.10 gate seven of its eight flags were exactly that. score is None when the
+        # question does not rank over a set, and those are EXCLUDED from the denominator
+        # rather than counted as passes.
+        cov = None
+        if COVERAGE:
+            cov = coverage_judge(question=ex["question"], prediction=ans,
+                                 context=out["context"])
 
     # "generation" is the answer-writing call. It is isolated because it is the ONLY figure
     # comparable with the pre-4.4 baseline (368,502 input tokens over 97 calls), which was
@@ -236,7 +259,7 @@ def score_one(ex):
     # exact, free, tokenizer-independent, and available for both paths. Roughly 4 chars
     # per token for this corpus. A metric that is not on the scoreboard does not get
     # optimised, and "I cut context by N%" is a claim that needs a before-number.
-    return {"ex": ex, "answer": ans, "c": c, "g": g, "rub": rub, "sc": sc,
+    return {"ex": ex, "answer": ans, "c": c, "g": g, "rub": rub, "sc": sc, "cov": cov,
             "ctx": len(out["context"]),
             "ctx_text": out["context"],
             "gen_in": gen_in, "gen_calls": gen_calls,
@@ -297,6 +320,16 @@ def run_set(name, examples, bucket_fn=None):
                                "rubric_facts": (f"{r['rub']['facts_ok']}/"
                                                 f"{r['rub']['facts_total']}") if r["rub"] else None,
                                "scope_why": r["sc"]["reasoning"][:300] if r["sc"] else None,
+                               # None here means "this question does not rank over a set",
+                               # which is NOT a pass - see the denominator below.
+                               "coverage": r["cov"]["score"] if r["cov"] else None,
+                               "coverage_required": r["cov"]["required"] if r["cov"] else None,
+                               "coverage_missing": r["cov"]["missing"] if r["cov"] else None,
+                               "coverage_why": (r["cov"]["reasoning"][:300]
+                                                if r["cov"] else None),
+                               # the observations, so a changed rule re-scores this run for $0
+                               "coverage_report": (r["cov"].get("raw_report")
+                                                   if r["cov"] else None),
                                "context_chars": r["ctx"],
                                "gen_input_tokens": r["gen_in"], "gen_calls": r["gen_calls"],
                                "product_input_tokens": r["prod_in"],
@@ -338,6 +371,52 @@ def run_set(name, examples, bucket_fn=None):
             print(f"  Groundedness (scope only): {scop}/{n} = {scop/n:.0%}")
             print(f"  Groundedness (binary AND scope): {andd}/{n} = {andd/n:.0%}"
                   f"   <- the strict one")
+
+        # --- SET COVERAGE (Phase 6.10b) -------------------------------------------------
+        # Printed apart from the block above and never folded into it. The denominator is
+        # only the questions that RANK over a set; an inapplicable item is excluded, not
+        # counted as a pass, or this number would rise every time an easy single-company
+        # question was added to a set.
+        cov_rows = [r for r in results if r["cov"] and r["cov"]["applicable"]]
+        cov_ran = [r for r in results if r["cov"]]
+        if cov_ran and not cov_rows:
+            # SAY SO. The judge was called on every question and billed for every question;
+            # printing nothing because none of them turned out to rank over a set makes a paid
+            # call invisible, which is how a cost stops being noticed. The first run of this
+            # wiring did exactly that on the regression set.
+            print(f"\n  SET COVERAGE (Phase 6.10b): not applicable to any of these {n} "
+                  f"questions - none rank or aggregate over a set.")
+            print(f"    The judge still ran on all {len(cov_ran)} to find that out; "
+                  f"applicability is its first observation, not a guess made before calling.")
+        if cov_rows:
+            covn = len(cov_rows)
+            covok = sum(r["cov"]["score"] for r in cov_rows)
+            declined = sum(1 for r in cov_rows if r["cov"]["declined"])
+            print(f"\n  SET COVERAGE (Phase 6.10b) - a THIRD axis, not part of any AND:")
+            print(f"  Coverage: {covok}/{covn} = {covok/covn:.0%}  of the {covn} questions "
+                  f"that rank or aggregate over a set ({n - covn} do not and are excluded)")
+            print(f"    declined to rank rather than guess: {declined}   <- the honest "
+                  f"output, and it scores 1")
+
+            flagged = [r for r in cov_rows if r["cov"]["score"] == 0]
+            novel = [r for r in flagged
+                     if r["c"]["score"] == 1
+                     and (r["sc"] is None or min(r["g"]["score"], r["sc"]["score"]) == 1)]
+            print(f"    flagged: {len(flagged)}, of which {len(novel)} pass correctness AND "
+                  f"groundedness   <- what no other scoreboard here can see")
+            # The flagged items ARE the output. This axis exists because three answers passed
+            # three scoreboards unread; printing a percentage and no rows would repeat that.
+            for r in flagged:
+                cv = r["cov"]
+                tag = "" if r["c"]["score"] == 0 else "   (correct + grounded)"
+                why = (f"missing {cv['missing']}" if cv["missing"]
+                       else "then excluded a member on a gap that is not real")
+                print(f"    {r['ex']['id']:5} ranked over {len(cv['required'])}, {why}{tag}")
+                if cv.get("exclusion_evidence"):
+                    for line in cv["exclusion_evidence"]:
+                        print(f"          excluded on a gap that is not real: {line[:96]}")
+            if not flagged:
+                print(f"    nothing flagged - every ranking accounted for its whole set")
 
             # The disagreements ARE the measurement. Two judges that always agree tell you
             # nothing; the rows where they part company are where the truth is contested,
