@@ -1,7 +1,7 @@
 """
 run_all_free.py - Phase 6.10. Every check in this repo that costs nothing, in one command.
 
-WHY THIS EXISTS AT A GATE. Fifteen free checks are scattered across fifteen files, and running
+WHY THIS EXISTS AT A GATE. Sixteen free checks are scattered across sixteen files, and running
 them one at a time is what has actually happened all project - so the honest answer to "is the
 repo consistent right now?" has always been "probably; I ran most of them". A gate needs ONE
 number.
@@ -11,10 +11,11 @@ scripts embed a query, which costs a fraction of a paisa at $0.15 per 1M tokens.
 marked NEAR-FREE and their cost is stated rather than rounded away, because "free" is a claim
 and this project has retracted enough of those.
 
-WHAT IS DELIBERATELY NOT RUN HERE: run_eval.py, red_team.py, rewrite_eval.py, smoke_api.py and
-smoke_cache.py. Those are the paid gates; they are run on purpose, by name, with their cost
-quoted first. A "run everything" command that quietly spent Rs 25 would be exactly the kind of
-convenience that erodes cost discipline.
+WHAT IS DELIBERATELY NOT RUN HERE: run_eval.py, red_team.py, rewrite_eval.py, smoke_api.py,
+smoke_cache.py, judge_coverage_suite.py and probe_coverage_regression.py. Those are the paid
+gates and judge calibrations; they are run on purpose, by name, with their cost quoted first.
+A "run everything" command that quietly spent Rs 25 would be exactly the kind of convenience
+that erodes cost discipline.
 
 ...and judges.py, WHICH THIS SCRIPT CAUGHT ON ITS FIRST RUN. It was in the free list because
 it looks like a self-test from the outside - it prints scores and pass marks - and its
@@ -47,9 +48,16 @@ CHECKS = [
     ("test_app.py",              False, "29 route checks against a stubbed agent"),
     ("test_server.py",           False, "6 checks against a real uvicorn thread pool"),
     ("probe_telemetry_equiv.py", False, "the eval and the API record cost identically"),
+    ("judges_coverage.py",       True,  "the set-coverage scoring rule, no model called"),
     ("test_mcp_server.py",       True,  "11 checks over real stdio JSON-RPC  [NEAR-FREE]"),
     ("probe_mcp_equivalence.py", True,  "MCP vs in-process, byte-identical    [NEAR-FREE]"),
 ]
+
+# judges_coverage.py needs_index=True and it is worth saying why, because its self-test calls
+# no model at all: it does `from rag import llm` at module level, and rag.py derives its
+# company list from the index. The SCORING RULE is free and index-independent; the IMPORT is
+# not. A file's cost and a file's dependencies are two different questions, and this list has
+# already been wrong once about the first one.
 
 SUBPROCESS_HEAVY = {"test_mcp_server.py", "probe_mcp_equivalence.py", "test_server.py"}
 
@@ -124,7 +132,8 @@ def main():
     print("  Every free check passes. Two of them embed a query (a fraction of a paisa);")
     print("  nothing here called a generation model or a judge.")
     print("  NOT run here, on purpose: run_eval.py, red_team.py, rewrite_eval.py, smoke_api.py,")
-    print("  smoke_cache.py - the paid gates, run by name with their cost quoted first.")
+    print("  smoke_cache.py, judge_coverage_suite.py, probe_coverage_regression.py - the paid")
+    print("  gates and judge calibrations, run by name with their cost quoted first.")
     print(f"{'=' * 92}")
 
 
