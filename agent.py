@@ -195,6 +195,56 @@ class SearchPlan(BaseModel):
     jobs: List[PlannedJob]
 
 
+# --- Phase 6.10b/d08: make the answer CHECKABLE rather than making the checker cleverer ----
+#
+# `d08` listed four revenues correctly and stated a combined figure 400 short of their sum -
+# the identical 400 in the 6.8 and the 6.10 gate, so it is deterministic. Third appearance of
+# the `d04` family, and the limitation "intermediate figures in multi-part answers are not
+# checked by anything" has been in the tracker for four phases.
+#
+# WHY THIS RULE RATHER THAN A REPAIR. probe_arith.py can already DETECT the contradiction for
+# free. The obvious next step was to hand the model its own contradiction and let it correct
+# itself, and probe_arith_repair.py measured that: it repairs a genuinely broken answer 3/3 -
+# and when handed a FALSE report about a CORRECT answer it obeyed, rewriting 127,929 to
+# 128,329, despite a prompt line telling it in plain words to return the answer unchanged if
+# the report was mistaken. So an automatic repair converts every detector false positive into
+# a wrong number, and this detector produced two extraction false positives during its own
+# construction. The repair was cancelled by the measurement taken to justify it - the fourth
+# time in this project (the semantic cache, the calculator, the canonical rewriter, this).
+#
+# WHAT IS LEFT is to remove the guessing from the DETECTOR instead. probe_arith's Tier 1 -
+# expressions whose operands are written down - scored 14/14 with zero false positives across
+# both gates. Tier 2 has to INFER the operands by subset-sum, and both extraction bugs lived
+# there. Asking the answer to show its addition moves these cases from Tier 2 to Tier 1: from
+# an inference to an exact comparison.
+#
+# rag.PROMPT is NOT edited. Contract #1 - rag.py changes only where a hardcoded corpus fact
+# becomes index-derived - so the rule is appended here, on the agent path only, and the
+# baseline path keeps answering exactly as every historical number in the tracker was produced.
+SHOW_ARITHMETIC = True
+
+ARITHMETIC_RULE = """When you state a figure you CALCULATED - a total, a combined figure, a \
+difference, a share or a percentage - write the calculation next to it, showing the numbers \
+you used and the result, for example: 10 + 20 + 30 = 60. Do not show a calculation for a \
+figure you read directly from an excerpt; quote those as they are.
+"""
+
+
+def _with_arithmetic_rule(template):
+    """Insert the rule immediately before the CONTEXT block of whichever template is in use.
+
+    Anchored on a string that must exist, and it ASSERTS rather than falling through. A
+    silent no-op here would ship a prompt change that never happened and a gate that measured
+    nothing - which is lesson 138 in its most expensive form, because the gate costs Rs 25.
+    """
+    if not SHOW_ARITHMETIC:
+        return template
+    marker = "\nCONTEXT:"
+    assert marker in template, \
+        f"the answer template has no {marker!r} anchor - the arithmetic rule would be dropped"
+    return template.replace(marker, "\n" + ARITHMETIC_RULE + marker, 1)
+
+
 PLAN_PROMPT = """You are a retrieval planner for a search system over SEC filings.
 
 The corpus contains exactly these filings, written as "COMPANY | PERIOD":
@@ -612,13 +662,18 @@ def answer_node(state: AgentState) -> dict:
         # model not to leak, and the output check refuses leaks, and both were on. That is
         # the same mistake the scope judge made: a verdict whose signal is unknown. Two
         # flags make the contribution of the words measurable instead of arguable.
-        template = guards.HARDENED_PROMPT if GUARD_PROMPT else PROMPT
+        # The rule goes on WHICHEVER template is selected. Putting it on only one of them
+        # would make the guarded and unguarded runs differ in a second way, and Phase 5
+        # exists because two changes at once cannot be attributed.
+        template = _with_arithmetic_rule(
+            guards.HARDENED_PROMPT if GUARD_PROMPT else PROMPT)
         prompt = (template.format(context=context, question=state["question"], tag=tag)
                   if GUARD_PROMPT else template.format(context=context,
                                                        question=state["question"]))
     else:
         context = "\n\n".join(d.page_content for d in state["chunks"])
-        prompt = PROMPT.format(context=context, question=state["question"])
+        prompt = _with_arithmetic_rule(PROMPT).format(context=context,
+                                                      question=state["question"])
 
     resp = llm.invoke(prompt)                    # retry-wrapped llm, same object the old path uses
     log_cost("gemini-3.1-flash-lite", resp, label="agent-generation")

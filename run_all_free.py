@@ -1,7 +1,7 @@
 """
 run_all_free.py - Phase 6.10. Every check in this repo that costs nothing, in one command.
 
-WHY THIS EXISTS AT A GATE. Sixteen free checks are scattered across sixteen files, and running
+WHY THIS EXISTS AT A GATE. Seventeen free checks are scattered across seventeen files, and running
 them one at a time is what has actually happened all project - so the honest answer to "is the
 repo consistent right now?" has always been "probably; I ran most of them". A gate needs ONE
 number.
@@ -48,7 +48,9 @@ CHECKS = [
     ("test_app.py",              False, "29 route checks against a stubbed agent"),
     ("test_server.py",           False, "6 checks against a real uvicorn thread pool"),
     ("probe_telemetry_equiv.py", False, "the eval and the API record cost identically"),
+    ("judges_scope.py",          True,  "figures/methodology rules; a year is not a figure"),
     ("judges_coverage.py",       True,  "the set-coverage scoring rule, no model called"),
+    ("probe_arith.py --selftest", False, "arithmetic self-consistency: extractor + checker"),
     ("test_mcp_server.py",       True,  "11 checks over real stdio JSON-RPC  [NEAR-FREE]"),
     ("probe_mcp_equivalence.py", True,  "MCP vs in-process, byte-identical    [NEAR-FREE]"),
 ]
@@ -60,6 +62,8 @@ CHECKS = [
 # already been wrong once about the first one.
 
 SUBPROCESS_HEAVY = {"test_mcp_server.py", "probe_mcp_equivalence.py", "test_server.py"}
+
+# The `script` field may include arguments; needs_index is checked against the file name.
 
 
 def main():
@@ -95,7 +99,11 @@ def main():
             continue
 
         t = time.perf_counter()
-        proc = subprocess.run([sys.executable, os.path.join(here, script)],
+        # An entry may carry arguments ("probe_arith.py --selftest"): its self-test is
+        # index-free and gate-file-free on purpose, but its DEFAULT mode reads a stored run,
+        # so the free list has to ask for the right one rather than hoping.
+        parts = script.split()
+        proc = subprocess.run([sys.executable, os.path.join(here, parts[0])] + parts[1:],
                               capture_output=True, text=True, cwd=here)
         secs = time.perf_counter() - t
         if proc.returncode == 0:

@@ -75,6 +75,14 @@ class Claim(BaseModel):
         description="Is the claim itself that the context does NOT contain something - a "
                     "refusal, 'not stated', 'cannot be calculated'? Such a claim makes no "
                     "factual assertion about the world.")
+    is_methodology: bool = Field(
+        default=False,
+        description="Is this sentence describing HOW the answer will compute something, or "
+                    "what a term means - 'To calculate the net profit margin, we divide net "
+                    "income by revenue', 'The figures below are in millions' - rather than "
+                    "asserting anything about a company's finances? A statement of method "
+                    "makes no claim about the world, so there is nothing for a context to "
+                    "support or fail to support.")
 
 
 class ScopeVerdict(BaseModel):
@@ -114,6 +122,12 @@ rate, only the INPUTS need to be present. Do not check whether the arithmetic is
 Step 5. Mark an assertion that merely reports something is MISSING from the context
 (a refusal, "not stated", "cannot be calculated") with asserts_absence.
 
+Step 6. Mark a sentence that describes HOW something will be computed, or what a term means,
+with is_methodology - "To calculate the net profit margin, we divide net income by revenue",
+"All figures are in millions", "We first identify the revenue for each company". These state a
+METHOD, not a fact about any company, so there is nothing in a context for them to rest on.
+A sentence that states a method AND a figure is not methodology: report the figure's scope.
+
 Judge the CONTENT and its SCOPE. Never the wording, length, tone or confidence.
 
 QUESTION: {question}
@@ -124,12 +138,60 @@ CONTEXT:
 SYSTEM ANSWER (being audited): {prediction}"""
 
 
-def _trivial(c):
-    """A claim that asserts an absence makes no factual assertion, so it cannot be ungrounded."""
-    return c.asserts_absence
+# Switchable so that ONE paid run can be scored under BOTH readings and the head-to-head costs
+# nothing - the same trick probe_scope_ab.py --recorded uses. Phase 4.5's rule is that a judge
+# is built BESIDE the one it might replace and wins on measurement; a boolean here is the
+# cheapest possible form of "beside".
+HONOUR_METHODOLOGY = True
+
+
+def _trivial(c, honour_methodology=None):
+    """A claim that makes no factual assertion cannot be ungrounded.
+
+    Two kinds. An ABSENCE claim ("not stated") has been here since Phase 4.5. A METHODOLOGY
+    sentence was added 2026-08-20, after this judge scored `d03` 0/3 times on:
+
+        "To calculate the net profit margin, we divide the net income attributable to
+         shareholders by the total net revenue"
+
+    ...having scored the IDENTICAL sentence 1, three times out of three, in the 6.10 gate. Same
+    context byte for byte; the only difference anywhere in the answer was cosmetic formatting of
+    the ratio lines. So the judge reads the same sentence differently depending on the markup
+    around it - the phrasing sensitivity Phase 4.5 measured in the CORRECTNESS judge, found in
+    this one, where nobody had looked. That makes it LATENT: any future prompt change can trip
+    it, and the answer was never the thing that changed.
+
+    The repair is not to make the judge steadier - it is to give it the category it was missing.
+    A statement of method asserts nothing about any company, so asking whether a context covers
+    "the methodology" is a question with no true answer, and a judge forced to answer it will
+    answer differently depending on the wind.
+    """
+    honour = HONOUR_METHODOLOGY if honour_methodology is None else honour_methodology
+    return c.asserts_absence or (honour and getattr(c, "is_methodology", False))
 
 
 _HAS_DIGIT = re.compile(r"\d")
+
+# A FISCAL YEAR IS A LABEL, NOT A FIGURE, and the difference cost `r01` a verdict.
+# `_figures_ok` below passes any claim with no digits, on the ground that a claim resting on
+# no figures cannot rest on absent ones. It keyed on ANY digit - and this is r01's opening
+# sentence:
+#
+#     "Based on the provided filings for fiscal year 2025 (or 2026 for NVIDIA), the following
+#      companies generated less cash from operations than the net income they reported:"
+#
+# Its only digits are 2025 and 2026. The SCOPE test passed it (covers=True). The figures test
+# then asked whether "the figures it rests on" are in the context, the model said no - which is
+# correct, there are none - and a framing sentence that asserts nothing scored the answer 0.
+# Six months of this judge's history had never produced such a sentence; the arithmetic rule
+# changed how answers open, and it appeared.
+#
+# The same trade-off the docstring below already accepts applies here and is not re-argued: a
+# digit-free claim CAN rest on figures ("revenue grew"), and this judge lets those through
+# because it is for SCOPE and the binary judge is ANDed beside it for factual support. Widening
+# "no digits" to "no digits other than years" does not change that bargain, it only stops years
+# from being mistaken for the thing the bargain is about.
+_YEAR_ONLY = re.compile(r"\b(?:19|20)\d{2}\b")
 
 
 def _figures_ok(c):
@@ -172,7 +234,7 @@ def _figures_ok(c):
     model returns a verbatim span from the context and CODE checks the span is really there,
     so a claim with nothing to quote fails. That is parked, not forgotten.
     """
-    if not _HAS_DIGIT.search(c.claim):
+    if not _HAS_DIGIT.search(_YEAR_ONLY.sub("", c.claim)):
         return True
     return c.input_figures_in_context
 
@@ -197,6 +259,11 @@ def scope_judge(question, prediction, context):
     bad = [c for c in v.claims
            if not _trivial(c)
            and not (c.context_covers_that_whole_set and _figures_ok(c))]
+    # The same claims scored under the OLD reading, so a run can report both without paying
+    # twice. This is what makes the methodology rule's effect separable from the prompt's.
+    bad_without = [c for c in v.claims
+                   if not _trivial(c, honour_methodology=False)
+                   and not (c.context_covers_that_whole_set and _figures_ok(c))]
     # An answer with no assertions at all is a refusal, and a refusal is trivially grounded -
     # the same rule the original judge states in its prompt, kept so the two are comparable.
     score = 0 if bad else 1
@@ -206,6 +273,72 @@ def scope_judge(question, prediction, context):
         + ("" if _figures_ok(c) else " - figures missing")
         for c in bad[:3])
     return {"score": score, "claims": len(v.claims), "bad": len(bad),
+            # the verdict the OLD rule would have given on these same observations
+            "score_without_methodology": 0 if bad_without else 1,
+            "methodology_claims": sum(1 for c in v.claims
+                                      if getattr(c, "is_methodology", False)),
             "detail": [(c.claim, c.ranges_over, c.context_covers_that_whole_set,
-                        c.input_figures_in_context, c.asserts_absence) for c in v.claims],
+                        c.input_figures_in_context, c.asserts_absence,
+                        getattr(c, "is_methodology", False)) for c in v.claims],
             "reasoning": why or f"all {len(v.claims)} claims within the context's scope"}
+
+
+
+# --- free self-tests: the two CODE rules, no model, no API key, no index -------------------
+# This file had no self-test at all, which is how a rule everybody reasons about ("a claim with
+# no digits rests on no figures") went four phases without anyone checking what it does to a
+# claim whose only digits are years.
+if __name__ == "__main__":
+    def _c(claim, cov=True, figs=True, absent=False, meth=False):
+        return Claim(claim=claim, ranges_over="whatever",
+                     context_covers_that_whole_set=cov, input_figures_in_context=figs,
+                     asserts_absence=absent, is_methodology=meth)
+
+    R01 = ("Based on the provided filings for fiscal year 2025 (or 2026 for NVIDIA), the "
+           "following companies generated less cash from operations than the net income "
+           "they reported:")
+
+    cases = [
+        # (name, claim, expected _figures_ok)
+        ("a real figure is still tested",
+         _c("Reported net income of $120,067 million", figs=False), False),
+        ("...and passes when the model says the figure IS present",
+         _c("Reported net income of $120,067 million", figs=True), True),
+        ("no digits at all - nothing to test, passes (Phase 4.5 rule, unchanged)",
+         _c("Management attributed the change to the Blackwell transition", figs=False), True),
+        ("🔴 r01: only digits are fiscal years - passes now, failed before",
+         _c(R01, figs=False), True),
+        ("a year AND a figure - the figure still gets tested",
+         _c("In fiscal year 2025 revenue was $34,639 million", figs=False), False),
+        ("1999 and 2026 are both years", _c("between 1999 and 2026", figs=False), True),
+        ("a quarter label keeps its digit and is tested",
+         _c("Q3 revenue", figs=False), False),
+    ]
+
+    trivia = [
+        ("ordinary claim is not trivial", _c("x"), False, False),
+        ("a refusal is trivial under both rules", _c("x", absent=True), True, True),
+        ("methodology is trivial ONLY with the rule on",
+         _c("To calculate the margin we divide", cov=False, meth=True), False, True),
+    ]
+
+    ok = 0
+    print("\n  judges_scope.py - _figures_ok, no model\n")
+    for name, c, expected in cases:
+        got = _figures_ok(c)
+        good = got == expected
+        ok += good
+        print(f"  [{'ok  ' if good else 'FAIL'}] got={got!s:5} expected={expected!s:5}  {name}")
+
+    print("\n  judges_scope.py - _trivial, both readings\n")
+    for name, c, exp_off, exp_on in trivia:
+        off, on = _trivial(c, honour_methodology=False), _trivial(c, honour_methodology=True)
+        good = off == exp_off and on == exp_on
+        ok += good
+        print(f"  [{'ok  ' if good else 'FAIL'}] off={off!s:5} on={on!s:5}  {name}")
+
+    total = len(cases) + len(trivia)
+    print(f"\n  {ok}/{total} checks passed. No model was called.")
+    print("  Both rules only ever WIDEN what passes, so neither can turn a 1 into a 0 -")
+    print("  which is why a code-only change here does not owe a full regression run.")
+    raise SystemExit(0 if ok == total else 1)
