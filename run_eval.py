@@ -392,18 +392,30 @@ def run_set(name, examples, bucket_fn=None):
             covn = len(cov_rows)
             covok = sum(r["cov"]["score"] for r in cov_rows)
             declined = sum(1 for r in cov_rows if r["cov"]["declined"])
-            print(f"\n  SET COVERAGE (Phase 6.10b) - a THIRD axis, not part of any AND:")
-            print(f"  Coverage: {covok}/{covn} = {covok/covn:.0%}  of the {covn} questions "
-                  f"that rank or aggregate over a set ({n - covn} do not and are excluded)")
-            print(f"    declined to rank rather than guess: {declined}   <- the honest "
-                  f"output, and it scores 1")
+            calibrated = getattr(judges_coverage, "CALIBRATED", True)
+            if calibrated:
+                print(f"\n  SET COVERAGE (Phase 6.10b) - a THIRD axis, not part of any AND:")
+                print(f"  Coverage: {covok}/{covn} = {covok/covn:.0%}  of the {covn} questions "
+                      f"that rank or aggregate over a set ({n - covn} do not and are excluded)")
+                print(f"    declined to rank rather than guess: {declined}   <- the honest "
+                      f"output, and it scores 1")
+            else:
+                # NO PERCENTAGE. The pre-registered rule was ">25% false positives and this does
+                # not ship as a reported scoreboard", and the 6.10c gate measured 43%. A number
+                # printed here would be quoted, compared and eventually written into the
+                # tracker; the ROWS below are what is still worth reading, so those still print.
+                print(f"\n  SET COVERAGE (Phase 6.10b) - 🔴 UNCALIBRATED, NO SCORE REPORTED")
+                print(f"    {getattr(judges_coverage, 'CALIBRATION_NOTE', '')}")
+                print(f"    {covn} of {n} questions rank over a set. The candidates below are")
+                print(f"    printed to be READ, not counted. See judges_coverage.py.")
 
             flagged = [r for r in cov_rows if r["cov"]["score"] == 0]
             novel = [r for r in flagged
                      if r["c"]["score"] == 1
                      and (r["sc"] is None or min(r["g"]["score"], r["sc"]["score"]) == 1)]
             print(f"    flagged: {len(flagged)}, of which {len(novel)} pass correctness AND "
-                  f"groundedness   <- what no other scoreboard here can see")
+                  f"groundedness"
+                  + ("   <- what no other scoreboard here can see" if calibrated else ""))
             # The flagged items ARE the output. This axis exists because three answers passed
             # three scoreboards unread; printing a percentage and no rows would repeat that.
             for r in flagged:

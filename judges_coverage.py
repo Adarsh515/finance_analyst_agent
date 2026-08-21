@@ -256,6 +256,43 @@ SYSTEM ANSWER (being audited): {prediction}"""
 # where the context says "NVIDIA", and a judge that failed an answer over a suffix would be
 # measuring string formatting. Decided in CODE for the same reason as _figures_ok in
 # judges_scope.py: a mechanical rule cannot forget itself the way a prompt instruction can.
+# ============================================================================================
+# 🔴 NOT CALIBRATED FOR THE CURRENT ANSWER STYLE. Set 2026-08-20 after the 6.10c gate.
+#
+# On the 6.10 gate this judge flagged 8 items and, read by hand, ZERO were false positives
+# against a pre-registered 25% ceiling. On the 6.10c gate it flagged 7 and THREE were false
+# positives - 43%. Nothing about the judge changed. The ANSWERS changed: the arithmetic rule
+# asks them to show their working, and they now write things like
+#
+#   x27  "Not stated as a percentage in the provided tables. HOWEVER, calculating the gross
+#         margin (Gross Profit / Total Revenues): 17,094 / 94,827 = 18.03%"
+#        -> the judge read "not stated" as an EXCLUSION. The answer included Tesla and named
+#           it correctly. The escalation then "confirmed" a gap that was never claimed.
+#
+#   x22  "AMD did not report a standalone Gaming segment revenue figure FOR FISCAL YEAR 2026"
+#        -> true. The escalation found AMD's FY2025 Gaming revenue and called the gap unreal.
+#           Right entity, right metric, WRONG PERIOD.
+#
+#   x24  lists all four revenues, ranks them, then computes a ratio over the two selected
+#        -> the judge measured coverage against the RATIO's metric instead of the RANKING's.
+#
+# One root cause under all three: the escalation checks that an entity's metric exists SOMEWHERE
+# in the context, and ignores the QUALIFIER the answer actually attached - "as a percentage",
+# "for fiscal year 2026", "for this metric rather than that one".
+#
+# So the pre-registered rule binds: >25% false positives and this does not ship AS A REPORTED
+# SCOREBOARD. It keeps running, because its candidate LIST is still worth reading and a check
+# switched off is a check that gets forgotten - but run_eval.py prints no percentage for it
+# until it is recalibrated against answers written in the current style.
+#
+# THE DEEPER POINT, which is lesson 147 for the third time: this judge's 0-false-positive record
+# was measured on a corpus of answers that no longer exists. A calibration is a statement about
+# INPUTS, and it expires when they change.
+CALIBRATED = False
+CALIBRATION_NOTE = ("calibrated on pre-6.10c answers; 3 of 7 flags were false positives after "
+                    "the arithmetic rule changed how answers phrase gaps")
+
+
 def observation_fingerprint():
     """A hash of everything that shapes a stored observation: the prompt and the schema.
 
