@@ -16,3 +16,4 @@ rewrite_*.jsonl
 rt_*.jsonl
 _mcp_server_stderr.log
 coverage_regression.jsonl
+scope_methodology.jsonl
