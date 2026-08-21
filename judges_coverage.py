@@ -288,9 +288,33 @@ SYSTEM ANSWER (being audited): {prediction}"""
 # THE DEEPER POINT, which is lesson 147 for the third time: this judge's 0-false-positive record
 # was measured on a corpus of answers that no longer exists. A calibration is a statement about
 # INPUTS, and it expires when they change.
-CALIBRATED = False
-CALIBRATION_NOTE = ("calibrated on pre-6.10c answers; 3 of 7 flags were false positives after "
-                    "the arithmetic rule changed how answers phrase gaps")
+# RESOLVED 2026-08-20 by RETIRING THE ESCALATION rather than repairing it, and the decision was
+# made from evidence that cost nothing: run_eval.py stores `coverage_report`, so both gates could
+# be re-scored offline under the narrowed rule.
+#
+#   6.10 answers   escalation contributed 1 flag (x27).  The other 7 survive without it,
+#                  INCLUDING x20 and x21 - the two cases this judge was built for.
+#   6.10c answers  escalation contributed 2 flags. BOTH were false positives.
+#
+# Lifetime record: one catch, two false alarms - and the one catch is on an answer that no
+# longer exists, because x27 is now correct and complete, so not flagging it is right rather
+# than a loss. Without the escalation the 6.10c gate flags 5 of 35, one of them false: **20%,
+# under the 25% ceiling.**
+#
+# THE ESCALATION WAS THE AMBITIOUS HALF and it is the half that failed. Its limitation was
+# written into ExclusionCheck from the first day - a quote can be real and still irrelevant -
+# and what actually broke it was narrower and worse: it checked that an entity's metric exists
+# somewhere in the context while ignoring the QUALIFIER the answer attached ("as a percentage",
+# "for fiscal 2026"). Under a tight budget the right move is not a cleverer second call; it is
+# to keep the part that works and stop paying for the part that impresses.
+#
+# The code stays, switched off, because the measurement above is only legible next to it.
+USE_ESCALATION = False
+
+CALIBRATED = True
+CALIBRATION_NOTE = ("escalation retired 2026-08-20; the simple coverage rule scores 5 flags of "
+                    "35 applicable on the 6.10c gate, 1 false positive = 20%, under the 25% "
+                    "pre-registered ceiling")
 
 
 def observation_fingerprint():
@@ -390,7 +414,7 @@ def verdict_from(v, false_exclusions=None):
     # The direction matters. If the gap is REAL - Tesla genuinely reports no Data Center
     # segment - excluding that member and ranking the rest is correct, and this branch must
     # pass it. That case is a labelled control in the suite, not just a sentence here.
-    if v.acknowledges_a_gap and v.members_called_unavailable:
+    if USE_ESCALATION and v.acknowledges_a_gap and v.members_called_unavailable:
         if false_exclusions is None:
             return {**base, "score": 1, "needs_escalation": True,
                     "reasoning": "committed to a selection after reporting a gap - the context "
@@ -604,6 +628,16 @@ if __name__ == "__main__":
                      commits_to_a_selection=True, acknowledges_a_gap=True,
                      members_called_unavailable=["Tesla"])
 
+    # The escalation is RETIRED (USE_ESCALATION = False), so its cases run with the flag
+    # forced on - they still describe what that branch does, and they are what a future
+    # recalibration would have to keep passing. The retired-path case below is the one that
+    # describes SHIPPED behaviour.
+    # A PLAIN GLOBAL ASSIGNMENT, not `import judges_coverage as _self; _self.X = True`.
+    # The first version did the latter and the flag never took: run as __main__ this file's
+    # globals ARE the __main__ namespace, and verdict_from reads that, not the separately
+    # imported module object. Two names for one module, and the test set the wrong one.
+    USE_ESCALATION = True
+
     escalation_cases = [
         ("x27 shape, context has not been checked yet -> provisional 1, flagged for escalation",
          _V(**X27_SHAPE), None, 1, True),
@@ -671,7 +705,19 @@ if __name__ == "__main__":
         ok += good
         print(f"  [{'ok  ' if good else 'FAIL'}] got={str(out['score']):4} "
               f"expected={str(expected):4}  esc={out['needs_escalation']!s:5}  {name}")
-    cases = cases + escalation_cases + quote_cases
+    # --- SHIPPED behaviour: the escalation is off, so x27's shape scores 1 -----------------
+    # x27's 6.10c answer says "not stated as a percentage... however, calculating... 18.03%"
+    # and names Tesla correctly. It did not exclude anything. With the escalation retired the
+    # judge stays out of it, which is the whole point of the retirement.
+    USE_ESCALATION = False
+    retired = verdict_from(_V(**X27_SHAPE))
+    good = retired["score"] == 1 and retired["needs_escalation"] is False
+    ok += good
+    print(f"\n  [{'ok  ' if good else 'FAIL'}] got={retired['score']} expected=1  "
+          f"esc={retired['needs_escalation']}  SHIPPED: escalation retired, a reported gap on "
+          f"an accounted-for member is not an exclusion")
+
+    cases = cases + escalation_cases + quote_cases + [("shipped retired-path", None, None)]
     print(f"\n  {ok}/{len(cases)} checks passed (quote verifier + scoring rule). "
           f"No model was called.")
     print("  Whether the MODEL fills these fields correctly is judge_coverage_suite.py's job,")
