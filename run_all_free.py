@@ -1,7 +1,7 @@
 """
 run_all_free.py - Phase 6.10. Every check in this repo that costs nothing, in one command.
 
-WHY THIS EXISTS AT A GATE. Seventeen free checks are scattered across seventeen files, and running
+WHY THIS EXISTS AT A GATE. Eighteen free checks are scattered across eighteen files, and running
 them one at a time is what has actually happened all project - so the honest answer to "is the
 repo consistent right now?" has always been "probably; I ran most of them". A gate needs ONE
 number.
@@ -103,8 +103,25 @@ def main():
         # index-free and gate-file-free on purpose, but its DEFAULT mode reads a stored run,
         # so the free list has to ask for the right one rather than hoping.
         parts = script.split()
+        # 🔴 PYTHONIOENCODING, and this runner found the need for it BY FAILING TWO CHECKS THAT
+        # PASS BY HAND. capture_output=True makes the child's stdout a PIPE, and on Windows
+        # Python encodes a pipe with the LOCALE codec (cp1252) rather than the console's UTF-8.
+        # So `python judges_scope.py` printed 10/10 in the terminal and the identical command
+        # under this runner died on a 🔴 in a test-case name - UnicodeEncodeError, exit 1, a red
+        # FAIL against a file with nothing wrong in it.
+        #
+        # That is lesson 124 inverted: usually the harness is SIMPLER than production and misses
+        # things; here the harness is DIFFERENT from the terminal and invents things. Either way
+        # the rule is the same - a check must run in the environment it is judged in. Forcing
+        # UTF-8 on the child fixes the class rather than deleting one emoji, because the next
+        # non-ASCII character anybody prints would land in exactly the same place.
+        #
+        # errors="replace" on the capture is a separate guard: a decode failure in the PARENT
+        # must never be able to hide a real failure in the child.
         proc = subprocess.run([sys.executable, os.path.join(here, parts[0])] + parts[1:],
-                              capture_output=True, text=True, cwd=here)
+                              capture_output=True, text=True, cwd=here,
+                              encoding="utf-8", errors="replace",
+                              env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         secs = time.perf_counter() - t
         if proc.returncode == 0:
             print(f"  {script:28} {'ok':>8}  {secs:5.1f}  {note}")
