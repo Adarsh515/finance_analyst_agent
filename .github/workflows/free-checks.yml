@@ -1,0 +1,100 @@
+# Every check in this repo that costs nothing, on every push.
+#
+# WHAT THIS GATE IS, AND WHAT IT IS NOT. It blocks a tree that is internally inconsistent -
+# a broken migration, a cache key that collides, a route that lost its CSRF guard, an eval
+# set whose ids stopped being unique. It does NOT measure answer quality; that needs the
+# paid gate, which is a separate, manually-triggered workflow, because a gate that quietly
+# spent Rs 29 on every push would destroy the cost discipline this repo exists to practise.
+#
+# THE DUMMY API KEY IS DELIBERATE AND IT IS NOT A SECRET. `judges.py` builds its model object
+# at IMPORT time, and langchain-google-genai validates that a key is PRESENT in the
+# constructor - so without one, thirteen checks die on the import line before running a
+# single assertion. Measured on a clean Ubuntu runner: with no key at all the suite fails;
+# with this obviously-fake string it reports 14 passed, 0 failed, 4 skipped in 49s and makes
+# ZERO network calls. Putting a real key here would buy nothing and risk everything.
+#
+# THE FOUR SKIPS ARE REAL AND ARE NOT HIDDEN. judges_scope, judges_coverage, test_mcp_server
+# and probe_mcp_equivalence need a built index, and building one costs about Rs 9 in
+# embeddings. They run in the paid workflow. A green tick here means "14 of 18", and the
+# floor check below exists so that number can never quietly drop.
+
+name: free checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  free-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'      # the version the project is developed on
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # A separate step, because "the deliverable's first step" has now been broken TWICE in
+      # this project - once by a UTF-16 requirements.txt and once by a freeze taken in the
+      # wrong environment that was missing fastapi. If an import breaks, this is where it
+      # shows, named, instead of surfacing later as a confusing check failure.
+      - name: Every third-party import the code actually uses
+        run: |
+          python -c "import fastapi, argon2, mcp, bs4, lxml, reportlab, docx, pandas, \
+                            langgraph, chromadb, langchain_google_genai, uvicorn; \
+                     print('every import resolves')"
+
+      # `shell: bash` is load-bearing, and the first draft of this file did not have it.
+      # GitHub's default Linux shell is `bash -e`, WITHOUT pipefail - so in `A | tee B` the
+      # step takes tee's exit code, not A's. Proved rather than assumed: `(exit 1) | tee`
+      # returns 0 without pipefail and 1 with it. This gate would have gone GREEN on a tree
+      # whose checks were failing, which is precisely the defect it exists to prevent.
+      # `shell: bash` selects `bash -eo pipefail`; the explicit `set -o pipefail` below says
+      # so out loud, for the next person who reads only the script.
+      - name: Free checks
+        shell: bash
+        env:
+          GOOGLE_API_KEY: ci-dummy-key-no-network-calls-are-made
+        run: |
+          set -o pipefail
+          python run_all_free.py | tee free-checks.log
+
+      # THE FLOOR. run_all_free.py already exits non-zero on a failure, so this does not
+      # guard against failures - it guards against SILENCE. A check that starts skipping
+      # instead of running still leaves the job green, and that is exactly the shape of
+      # defect this repo keeps finding: a check that passed over the wrong scope.
+      - name: At least 14 checks must have actually run
+        shell: bash
+        run: |
+          line=$(grep -E '^  [0-9]+ passed,' free-checks.log)
+          echo "$line"
+          passed=$(echo "$line" | sed -E 's/^  ([0-9]+) passed.*/\1/')
+          if [ "$passed" -lt 14 ]; then
+            echo "::error::only $passed checks ran; the floor is 14. A check is skipping that used to run."
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Free checks"
+            echo ''
+            echo '```'
+            tail -n 30 free-checks.log
+            echo '```'
+            echo ''
+            echo "Four checks need a built index and run only in the paid gate:"
+            echo "\`judges_scope\`, \`judges_coverage\`, \`test_mcp_server\`, \`probe_mcp_equivalence\`."
+          } >> "$GITHUB_STEP_SUMMARY"

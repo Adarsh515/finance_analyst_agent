@@ -546,8 +546,11 @@ Each of these was scoped, priced, and then not built — with the reason recorde
 
 Written down rather than discovered later, in the bill or in a review.
 
-- **`/ask` is not rate limited.** Login is. A signed-in user can spend the API key in a loop.
-  Acceptable for one analyst on a laptop; unacceptable the moment this is deployed.
+- **`/ask` is rate limited per user — and per user is not the same as safe.** Two bounds now
+  apply per account per hour: 40 paid questions and $1.00, counted from the `traces` table,
+  with cache hits excluded because they cost nothing. What it does not stop is *many accounts*
+  — signup itself has no rate limit — so the bound restrains an honest user and merely
+  inconveniences a determined one.
 - **Concurrency is configured, not measured.** WAL and a 5-second busy timeout are set and
   endpoints run in a thread pool, but no two requests have ever hit `app.db` at once. SQLite
   serialises writers, so this is a latency question rather than a correctness one — and it is
