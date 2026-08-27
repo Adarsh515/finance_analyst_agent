@@ -342,7 +342,7 @@ python run_all_free.py
 ```
 
 Eighteen self-tests and equivalence probes: schema migrations, the cache, cost capture, the
-guards, every eval set's internal consistency, 29 API route checks against a stubbed agent, six
+guards, every eval set's internal consistency, 33 API route checks against a stubbed agent, six
 more against a real Uvicorn thread pool, and eleven against the MCP server over real stdio
 JSON-RPC. Two of them embed a query — a fraction of a paisa — and say so rather than rounding it
 away. **The paid gates are excluded by name**, because a "run everything" command that quietly

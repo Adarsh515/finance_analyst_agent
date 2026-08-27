@@ -96,6 +96,29 @@ CACHE_FINGERPRINT = cache.index_fingerprint(agent.FILINGS)
 CACHE_ENABLED = os.environ.get("CACHE_OFF", "").lower() not in ("1", "true", "yes")
 
 
+# --- /ask rate limiting -----------------------------------------------------------------------
+# WHY THIS EXISTS, AND WHY IT TOOK THIS LONG. "/ask is not rate limited; login is" has been a
+# WRITTEN limitation since 6.2 - a signed-in user can spend the API key as fast as they can
+# type. That was acceptable for one analyst on a laptop and is not acceptable anywhere else,
+# and it was written down precisely so a later phase could not discover it in a bill.
+#
+# TWO KNOBS, because they stop two different failures and neither one covers the other:
+#   - a tight loop is a BURST, and only a COUNT catches it;
+#   - a slow drain is a BUDGET, and only MONEY catches it. Forty cheap questions and four
+#     expensive ones cost the same, and a count alone cannot tell them apart.
+#
+# Both live HERE, in code - not in a prompt, not in a settings table, not in an environment
+# variable that can be quietly widened. Same rule as MAX_JOBS and MAX_ROUNDS: a bound that
+# lives somewhere it can be argued with is not a bound.
+#
+# WHAT THIS DOES NOT DO, stated so it is not trusted past its limits: it is PER USER. It does
+# nothing about many accounts, and signup is not rate limited by account creation rate. That
+# is a different defence and it is not built.
+ASK_WINDOW_MINUTES = 60
+MAX_PAID_ASKS_PER_WINDOW = 40
+MAX_USD_PER_WINDOW = 1.00
+
+
 # --- database, one connection per request -----------------------------------------------------
 # sqlite3 connections are not safe to share across threads, and every endpoint below is a
 # plain `def`, which FastAPI runs in a worker thread. One connection per request is the
@@ -228,6 +251,11 @@ def health():
     one tells you which system is alive.
     """
     return {"status": "ok", "filings": len(agent.FILINGS),
+            # Reported for the same reason as everything else here: a limit nobody can read
+            # is a limit nobody can check. These three are the whole /ask rate limit.
+            "ask_window_minutes": ASK_WINDOW_MINUTES,
+            "max_paid_asks_per_window": MAX_PAID_ASKS_PER_WINDOW,
+            "max_usd_per_window": MAX_USD_PER_WINDOW,
             "cache_enabled": CACHE_ENABLED, "cache_fingerprint": CACHE_FINGERPRINT,
             "guards": agent.GUARDS, "guard_prompt": agent.GUARD_PROMPT,
             "schema_version": db.SCHEMA_VERSION, "cookie_secure": COOKIE_SECURE,
@@ -447,6 +475,25 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     question = body.question.strip()
     if not question:
         raise HTTPException(400, "Question is empty.")
+
+    # THE ORDER MATTERS HERE TOO. The limit is checked before ANY write and before any model
+    # call - a refused request must not leave a user turn stranded in a conversation with no
+    # answer under it, and must not create an empty conversation as a side effect.
+    used = db.recent_asks(conn, user["id"], ASK_WINDOW_MINUTES)
+    if used["paid"] >= MAX_PAID_ASKS_PER_WINDOW:
+        # THE WORDING IS PRECISE ON PURPOSE, and the first draft of it was wrong. A cache hit
+        # does not COUNT towards the limit, but once the limit is reached it is not EXEMPT
+        # from it either - this guard sits ahead of the cache lookup, because the lookup
+        # needs the rewriter to have run and the rewriter is itself a paid call. Saying
+        # "cached repeats are free" here would have been a false statement printed at the
+        # exact moment a user is trying to understand why they were refused.
+        raise HTTPException(429, f"Rate limit reached: {MAX_PAID_ASKS_PER_WINDOW} paid questions "
+                                 f"per {ASK_WINDOW_MINUTES} minutes. Answers served from the "
+                                 f"cache are not counted towards it, but no further requests "
+                                 f"are accepted until the window clears.")
+    if used["usd"] >= MAX_USD_PER_WINDOW:
+        raise HTTPException(429, f"Spend limit reached: ${MAX_USD_PER_WINDOW:.2f} per "
+                                 f"{ASK_WINDOW_MINUTES} minutes. Try again shortly.")
 
     if body.conversation_id is None:
         title = question[:60] + ("…" if len(question) > 60 else "")

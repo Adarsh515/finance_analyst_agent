@@ -463,6 +463,73 @@ def main():
     assert other.get(f"/conversations/{conv_for_export}/export").status_code == 404
     ok += 1
 
+    # --- /ask rate limiting -------------------------------------------------------------------
+    # RUNS LAST AMONG THE ROUTE TESTS, because tripping the limit would 429 everything after it.
+    #
+    # WHY THERE IS A CONTROL ARM. This block could assert only that a 429 eventually fires -
+    # and a limiter that refuses EVERYTHING would sail through that assertion. The first
+    # check below is the one pointed in the REWARDING direction: a cache hit must not move
+    # the counter, because the limit exists to bound spend and a cache hit costs $0.000000.
+    # Lesson 150 in this project, applied to a guard instead of a judge.
+    _c = db.connect()
+    uid = _c.execute("SELECT id FROM users WHERE email = 'adarsh@example.com'").fetchone()["id"]
+    W = appmod.ASK_WINDOW_MINUTES
+
+    # SELF-CONTAINED ON PURPOSE, and the first draft was not. It reused a question asked in
+    # the cache section and assumed it was still cached - but the guardrail block above
+    # clears the cache, so the control failed against a perfectly correct limiter. A control
+    # that leans on state another test owns will fail for a reason it invented, which is
+    # lesson 112 arriving twice inside one change. This one asks its OWN question, twice, and
+    # checks the counter after each - so it proves both directions in one place: a paid
+    # answer must count, and the free repeat of it must not.
+    RL_Q = "What was NVIDIA's operating income for fiscal year 2026?"
+    before = db.recent_asks(_c, uid, W)["paid"]
+
+    r1 = client.post("/ask", json={"question": RL_Q}, headers=H).json()
+    assert r1["cache_hit"] is False, "a brand new question came back as a cache hit"
+    mid = db.recent_asks(_c, uid, W)["paid"]
+    assert mid == before + 1, f"a paid answer did not count towards the limit: {before} -> {mid}"
+
+    r2 = client.post("/ask", json={"question": RL_Q}, headers=H).json()
+    assert r2["cache_hit"] is True, "the identical repeat did not hit the cache"
+    assert db.recent_asks(_c, uid, W)["paid"] == mid, \
+        "a free cache hit counted against the rate limit"
+    ok += 1
+
+    # Now the limit itself. The constants are patched on the MODULE OBJECT, and that works
+    # only because `ask()` reads them as globals AT CALL TIME. If they are ever "tidied" into
+    # default arguments this test goes green while testing nothing - which is exactly how
+    # judges_coverage's self-test managed to set a flag that never took effect.
+    _paid_cap, _usd_cap = appmod.MAX_PAID_ASKS_PER_WINDOW, appmod.MAX_USD_PER_WINDOW
+    try:
+        appmod.MAX_PAID_ASKS_PER_WINDOW = db.recent_asks(_c, uid, W)["paid"] + 1
+        r = client.post("/ask", json={"question": "How much did AMD spend on R&D?"}, headers=H)
+        assert r.status_code == 200, f"the limit fired one question early ({r.status_code})"
+        r = client.post("/ask", json={"question": "What were Intel's total assets?"}, headers=H)
+        assert r.status_code == 429, f"/ask accepted a request past the count limit ({r.status_code})"
+        ok += 1
+
+        # A refused request must leave NOTHING behind. The guard sits ahead of every write for
+        # this reason: a 429 that still created a conversation, or stored a user turn with no
+        # answer under it, would show up in the UI as a question the system ignored.
+        convs_before = len(client.get("/conversations").json()["conversations"])
+        client.post("/ask", json={"question": "A brand new question that must be refused."},
+                    headers=H)
+        assert len(client.get("/conversations").json()["conversations"]) == convs_before, \
+            "a rate-limited request still created a conversation"
+        ok += 1
+
+        # The SPEND limit is a separate knob and needs its own arm - forty cheap questions and
+        # four expensive ones cost the same, and a count alone cannot tell them apart.
+        appmod.MAX_PAID_ASKS_PER_WINDOW = 10_000       # take the count limit out of the way
+        appmod.MAX_USD_PER_WINDOW = 0.0000001          # below anything already spent
+        r = client.post("/ask", json={"question": "What was Tesla's gross profit?"}, headers=H)
+        assert r.status_code == 429, f"the spend limit did not fire ({r.status_code})"
+        ok += 1
+    finally:
+        appmod.MAX_PAID_ASKS_PER_WINDOW, appmod.MAX_USD_PER_WINDOW = _paid_cap, _usd_cap
+        _c.close()
+
     # --- app.py must survive being imported TWICE --------------------------------------------
     # Not a hypothetical. `python app.py` runs this file as `__main__`, then uvicorn's import
     # string re-imports it as `app`, and the second pass died on

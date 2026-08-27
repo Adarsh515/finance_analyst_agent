@@ -576,6 +576,32 @@ def recent_failures(conn, since_iso, email=None, ip=None):
         (value, last_ok_id, since_iso)).fetchone()["n"]
 
 
+def recent_asks(conn, user_id, minutes):
+    """Paid answers by ONE user inside a rolling window - the input to the /ask rate limit.
+
+    THE DESIGN DECISION IS THE `cache_hit = 0`, and it is deliberate rather than convenient.
+    This limit exists to bound SPEND, not curiosity. A cache hit costs $0.000000, so counting
+    it would throttle a user for asking something the system never paid to answer - and the
+    cache is global, so it would also let one user's history throttle another's.
+
+    NO NEW TABLE, and that is the second decision. `login_attempts` is the wrong home: it
+    records failed AUTH, and this counts successful WORK. But `traces` already carries
+    user_id, cache_hit, usd and created_at for every answer, and `ix_trace_user` already
+    indexes (user_id, created_at DESC) - the exact index this query wants. A second table
+    would be a second source of truth for a fact this one already owns.
+
+    Returns both numbers in one query because the caller needs both and they cannot be
+    allowed to disagree about which window they describe.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(minutes=minutes)
+             ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    row = conn.execute(
+        "SELECT COUNT(*) AS paid, COALESCE(SUM(usd), 0.0) AS usd FROM traces "
+        "WHERE user_id = ? AND cache_hit = 0 AND created_at >= ?",
+        (user_id, since)).fetchone()
+    return dict(row)
+
+
 def user_spend(conn, user_id):
     row = conn.execute(
         "SELECT COUNT(*) AS questions, COALESCE(SUM(input_tokens),0) AS input_tokens, "
@@ -716,6 +742,30 @@ if __name__ == "__main__":
     # not what they would have been charged in a world without a cache.
     spend = user_spend(c, uid)
     assert spend["questions"] == 2 and spend["input_tokens"] == 7736 + 210, spend
+    ok += 1
+
+    # recent_asks is user_spend's WINDOWED sibling, and the difference between them IS the
+    # rate limit: it counts only what was actually PAID FOR. Two traces exist above and one
+    # of them is a cache hit, so a limiter reading this must see exactly ONE. If the
+    # `cache_hit = 0` filter is ever dropped, this assertion is the only thing that notices -
+    # both numbers stay perfectly plausible, and the only symptom downstream is a user being
+    # throttled for questions the system never paid to answer.
+    #
+    # The expected total is SUMMED from the call rows above rather than typed: lesson 111,
+    # do not retype a fact this file already owns.
+    asks = recent_asks(c, uid, 60)
+    assert asks["paid"] == 1, f"recent_asks counted a cache hit against the rate limit: {asks}"
+    assert abs(asks["usd"] - sum(x[4] for x in calls)) < 1e-12, asks
+    # ...and a window that excludes everything must return nothing, or the limit never resets.
+    #
+    # A NEGATIVE window, not zero, and the first draft of this line used zero and FAILED - on
+    # its first run, against perfectly correct code. `minutes=0` puts the boundary at `now`,
+    # both sides truncate to whole seconds, and a row written milliseconds earlier is inside
+    # the same second and therefore inside the window. That is the resolution problem this
+    # file already documents for recent_failures - *a second-precision timestamp is not a sort
+    # key* - and it made the control fail for a reason the control invented (lesson 112).
+    # -1 puts the boundary a minute in the FUTURE, where nothing can legitimately match.
+    assert recent_asks(c, uid, -1)["paid"] == 0, "the window bound is not being applied at all"
     ok += 1
 
     # failures accumulate, and a SUCCESS clears the slate - otherwise one typo a month

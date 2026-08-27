@@ -45,7 +45,7 @@ CHECKS = [
     ("rewrite_set.py",           False, "25 items, ids unique across all three sets"),
     ("tesla_set.py",             False, "8 items, evidence supports every figure"),
     ("rewriter.py",              False, "bounds, cleaner, future-period rule"),
-    ("test_app.py",              False, "29 route checks against a stubbed agent"),
+    ("test_app.py",              False, "33 route checks against a stubbed agent"),
     ("test_server.py",           False, "6 checks against a real uvicorn thread pool"),
     ("probe_telemetry_equiv.py", False, "the eval and the API record cost identically"),
     ("judges_scope.py",          True,  "figures/methodology rules; a year is not a figure"),
