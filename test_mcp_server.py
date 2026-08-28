@@ -16,6 +16,7 @@ fraction of a paisa. No generation model is invoked, and no answer is produced a
 """
 
 import asyncio
+import json
 import os
 import sys
 
@@ -158,9 +159,78 @@ async def run():
                            for t in tools), [t.name for t in tools]
             ok += 1
 
+    ok += await run_from_a_foreign_directory()
+
     print(f"\ntest_mcp_server.py: {ok}/{ok} checks passed over real stdio JSON-RPC")
     print("  Spawned the server as a subprocess and spoke the protocol, exactly as a")
     print("  desktop client does. No generation model was called.")
+
+
+async def run_from_a_foreign_directory():
+    """Start the server from a directory that is NOT the project, and demand real filings.
+
+    THIS IS THE CHECK THAT SHOULD HAVE EXISTED FROM THE FIRST DAY, and its absence is the
+    whole finding. Every other check in this file passes `cwd=here` - the project folder,
+    the perfect environment, the one place the server was never going to fail. The server's
+    entire justification is question 1 in its own docstring: "must it be usable from OUTSIDE
+    this codebase?" A test that never leaves the codebase cannot answer that question, and
+    for three phases it was quietly assumed to have answered it.
+
+    Run against the code as it stood before this was written, the server came up, answered
+    the handshake, reported `serving 0 filings`, and returned an empty result set for every
+    query - because rag.py resolves .env and chroma_db against the working directory. Nothing
+    crashed. Nothing was logged as an error. The client was simply told, politely and
+    incorrectly, that the filings do not mention NVIDIA.
+
+    A FOREIGN DIRECTORY, not a temp directory, and the difference is the point: the parent of
+    the project is a real folder a real client might sit in, and it contains no .env and no
+    chroma_db. Costs one embedding call.
+    """
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    foreign = os.path.dirname(here)
+    assert os.path.normcase(foreign) != os.path.normcase(here), "the foreign cwd is the project"
+
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[os.path.join(here, "filing_search_server.py")],
+        # The environment is passed through, because a desktop client passes its own and the
+        # key is NOT in it - the diagnostic confirmed GOOGLE_API_KEY is absent from the user
+        # environment and reaches the process only through .env. If this test injected the
+        # key it would be repairing, from the outside, the exact dependency it is testing.
+        env={**os.environ},
+        cwd=foreign,
+    )
+    errlog = open(os.path.join(here, "_mcp_server_stderr_foreign.log"), "w+", encoding="utf-8")
+
+    ok = 0
+    async with stdio_client(params, errlog=errlog) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            listed = json.loads((await session.call_tool("list_filings", {})).content[0].text)
+            assert "error" not in listed, (
+                f"started from {foreign} the server reports: {listed.get('detail')}")
+            assert listed["count"] > 0, (
+                f"the server found {listed['count']} filings when started from {foreign} - "
+                f"it is resolving its index against the caller's working directory")
+            ok += 1
+
+            # And it must actually RETRIEVE, not merely list. A server can know the index
+            # exists and still search the wrong one.
+            hit = json.loads((await session.call_tool(
+                "search_filings",
+                {"query": "total revenue", "company": "NVIDIA", "k": 3})).content[0].text)
+            assert hit.get("count", 0) > 0, (
+                f"search returned {hit.get('count')} results from a foreign cwd: {hit}")
+            ok += 1
+
+    print(f"  started from {foreign}")
+    print(f"  and still served {listed['count']} filings - the server no longer depends on "
+          f"its caller's directory")
+    return ok
 
 
 if __name__ == "__main__":

@@ -10,8 +10,22 @@ this repo exists — which is the entire argument for putting retrieval behind M
 
 Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
+**...unless Claude Desktop was installed from the Microsoft Store**, and this cost a few
+minutes of hunting on the machine this was actually set up on. A packaged (MSIX) app gets its
+own redirected AppData, so the live file is:
+
+```
+C:\Users\<you>\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
+```
+
+Editing `%APPDATA%\Claude\` in that case edits a file the app never reads - and the failure
+is silent, which is this document's recurring theme. If both paths exist, the one under
+`Packages\...\LocalCache` is the one to trust. Search for the filename rather than assuming.
+
 Open it in a text editor. If the file does not exist, create it. If it already has an
-`mcpServers` block, add `filing-search` inside it rather than replacing the block.
+`mcpServers` block, add `filing-search` inside it rather than replacing the block. **Back the
+file up first** - it also holds your desktop preferences and trusted-folder grants, and a
+mistyped edit loses them.
 
 ```json
 {

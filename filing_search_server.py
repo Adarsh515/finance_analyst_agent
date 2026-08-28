@@ -43,6 +43,31 @@ import sys
 # a client that cached a schema needs a way to notice.
 SERVER_VERSION = "6.9.0"
 
+# THE WORKING DIRECTORY IS PART OF THE SERVER'S JOB, and this file used to leave it to
+# whoever launched us. It cannot: rag.py resolves BOTH of its inputs relative to the process
+# working directory -
+#
+#     load_dotenv()                      the API key, looked up as "./.env"
+#     persist_directory="chroma_db"      the vector index, looked up as "./chroma_db"
+#
+# and agent.py imports rag at line 44, so every path in the chain inherits that assumption.
+# rag.py is contract #1 and is not edited, so the fix belongs HERE, in the one file whose
+# entire justification is that SOMEBODY ELSE'S CLIENT starts it. A client chooses its own
+# working directory and is under no obligation to tell us; Claude Desktop starts from its
+# own install location.
+#
+# WHAT THIS ACTUALLY FIXED, measured rather than assumed. Spawned from a home folder, with a
+# real `initialize` request on a pipe, this server answered the handshake and then reported
+# `serving 0 filings` - it did not crash, it did not warn the client, it simply answered
+# every question with "nothing found" for the rest of the session. A wrong answer delivered
+# confidently is worse than a crash, because a crash gets investigated.
+#
+# `os.chdir` is a process-global side effect and that is normally a smell. It is correct here
+# for one reason: this file is a PROCESS ENTRY POINT, not a library. Nothing imports it - both
+# test_mcp_server.py and probe_mcp_equivalence.py spawn it as a subprocess - so the only
+# environment it mutates is its own.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
 # stdio transport means STDOUT IS THE PROTOCOL. Anything printed to it that is not JSON-RPC
 # corrupts the stream and the client sees a parse error rather than a message. agent.py's
 # node logging is on by default, and rag.py prints a warning when the index is empty - both
@@ -134,6 +159,9 @@ def search_filings(query: str, company: str = "", period: str = "", k: int = 6) 
     also means the equivalence probe can compare this server against the in-process path and
     expect BYTE-IDENTICAL chunk ids.
     """
+    if not agent.FILINGS:
+        return json.dumps(_empty_index_error(), ensure_ascii=False, indent=2)
+
     k = max(1, min(int(k or 6), 20))          # bound in code; a client may ask for anything
 
     # agent._chroma_filter, NOT a dict built here. The first version of this function built
@@ -197,6 +225,30 @@ def filings_resource() -> str:
     return json.dumps(_filings_payload(), ensure_ascii=False, indent=2)
 
 
+def _empty_index_error():
+    """What a client is told when the index holds nothing.
+
+    THE POINT IS THAT IT IS NOT AN EMPTY RESULT SET. An empty result set is a fact about the
+    QUERY - "the filings do not discuss this" - and a model that receives one will report
+    exactly that, in good faith, having been misled. This payload is a fact about the SERVER,
+    and it says so in a field the model will read out loud.
+
+    Refusing to start would be the other option and it is worse: the client renders a dead
+    server as "Server disconnected", which names the symptom and hides the cause. This
+    project spent a whole session on that message. A server that starts and explains itself
+    is debuggable from the client's own transcript.
+    """
+    return {
+        "error": "the filing index is empty",
+        "count": 0,
+        "results": [],
+        "detail": (f"This server found no indexed filings in {os.getcwd()}. It has NOT "
+                   f"searched anything, so this is not evidence that the filings lack the "
+                   f"answer - do not report it as such. The index is built by running "
+                   f"build_index.py in the server's own directory."),
+    }
+
+
 def _filings_payload():
     counts = {}
     try:
@@ -206,6 +258,9 @@ def _filings_payload():
             counts[key] = counts.get(key, 0) + 1
     except Exception as e:                    # a chunk count is nice, not load-bearing
         print(f"[filing-search] chunk counts unavailable: {e}", file=sys.stderr)
+
+    if not agent.FILINGS:
+        return _empty_index_error()
 
     return {
         "count": len(agent.FILINGS),
@@ -220,6 +275,9 @@ if __name__ == "__main__":
     if not agent.FILINGS:
         print("[filing-search] WARNING: the index reports no filings. Run build_index.py.",
               file=sys.stderr)
+    # The DIRECTORY is printed, not just the count. When a client reports a server that
+    # "works but finds nothing", the first question is always which folder it read, and a
+    # count on its own cannot answer it.
     print(f"[filing-search] serving {len(agent.FILINGS)} filings over stdio "
-          f"via {_MCP_API}", file=sys.stderr)
+          f"via {_MCP_API}  (index directory: {os.getcwd()})", file=sys.stderr)
     mcp.run(transport="stdio")
