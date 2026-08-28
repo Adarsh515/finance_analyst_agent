@@ -142,11 +142,21 @@ def evaluate(eval_rows, rt_rows):
         g_good, g_tot = _tally(rows, "grounded")
         lines.append(f"  report {name:17} correct {c_good}/{c_tot}   grounded {g_good}/{g_tot}")
 
+    # THESE ARE STORED VERDICTS, and the distinction is not pedantic. A row's `coverage`
+    # value was written by the judge AS CONFIGURED WHEN THE RUN WAS TAKEN. The set-coverage
+    # judge was recalibrated on 2026-08-20 by retiring its escalation, and that recalibration
+    # was done offline from stored OBSERVATIONS without rewriting the run files - so
+    # eval_610c_gate.jsonl still carries 7 flags where today's judge produces 5. Printing the
+    # number without saying whose number it is would quietly attribute an old judge's verdict
+    # to the current one. Lesson 159: a calibration is a statement about its inputs.
     for field, name in (("scope", "groundedness scope"), ("grounded_and", "binary AND scope"),
                         ("coverage", "set coverage")):
         good, total = _tally(eval_rows, field)
         if total:
             lines.append(f"  report {name:24} {good}/{total}")
+    if any(r.get("coverage") is not None for r in eval_rows):
+        lines.append("         (judge verdicts as stored AT RUN TIME, not as the judges are "
+                     "configured now)")
 
     return not failures, lines, failures
 

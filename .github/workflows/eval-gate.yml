@@ -1,0 +1,137 @@
+# The PAID gate. Manual only, and that is the entire point.
+#
+# WHY THIS IS NOT ON `push`. A full run is 102 questions through four judges plus 25 attacks:
+# about Rs 32 when the index is cached and Rs 41 when it is not. A gate that spent that on
+# every push would quietly cost more in a busy week than this project spent in four months -
+# and it would destroy the cost discipline the repo exists to practise. The free workflow
+# runs on every push and blocks a broken tree; this one runs when a human decides the answer
+# quality needs re-measuring, which is exactly how it has always been run by hand.
+#
+# THE CONFIRMATION INPUT IS NOT CEREMONY. This project's standing rule is that the cost of a
+# run is quoted BEFORE the run, out loud, every time. Encoding that as a required input means
+# the rule survives the person who wrote it.
+#
+# WHAT DECIDES: ci_gate.py, and nothing else. run_eval.py and red_team.py both exit 0 no
+# matter what they measure - correctly, because they are instruments. Read ci_gate.py for
+# what is gated and, more importantly, for what is deliberately NOT.
+
+name: eval gate (paid)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'This run costs roughly Rs 32 (Rs 41 if the index must be rebuilt). Type "yes" to proceed.'
+        required: true
+        default: 'no'
+      sets:
+        description: 'Which eval sets to run'
+        required: true
+        default: 'all'
+        type: choice
+        options: ['all', 'both', 'regression']
+
+jobs:
+  eval-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Refuse unless the cost was acknowledged
+        if: inputs.confirm != 'yes'
+        run: |
+          echo "::error::confirm was '${{ inputs.confirm }}'. This workflow spends real money and will not run until it is 'yes'."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # THE INDEX IS CACHED ON THE THINGS THAT CAN CHANGE IT, and on nothing else. The key is
+      # a hash of corpus.py (what we INTEND to index) and data/ (what is actually there).
+      # Add a filing, edit the parser's inputs, and the key moves and the index is rebuilt;
+      # change a prompt or a judge and it is not, because neither can alter an embedding.
+      # This is the same reasoning as putting the index fingerprint inside the cache key:
+      # make the invalidator part of the identity instead of something to remember.
+      - name: Restore the index
+        id: index-cache
+        uses: actions/cache@v4
+        with:
+          path: chroma_db
+          key: chroma-${{ hashFiles('corpus.py', 'parse_filing.py', 'data/**') }}
+
+      - name: Build the index (only on a cache miss, about Rs 9)
+        if: steps.index-cache.outputs.cache-hit != 'true'
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: python build_index.py
+
+      - name: Free checks first
+        shell: bash
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          set -o pipefail
+          python run_all_free.py | tee free-checks.log
+
+      # THE ORDER IS DELIBERATE: free checks, then paid. `run_all_free.py` says it in its own
+      # words - a paid run against a broken tree measures the wrong system. Spending Rs 32 to
+      # discover a migration was broken is the most expensive way to learn it.
+      - name: The eval (102 questions, four judges)
+        shell: bash
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          set -o pipefail
+          python run_eval.py --agent --set ${{ inputs.sets }} --out gate.jsonl | tee eval.log
+
+      - name: The red team (25 attacks, 5 families)
+        shell: bash
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          set -o pipefail
+          python red_team.py --out rt.jsonl | tee redteam.log
+
+      - name: The gate
+        shell: bash
+        run: |
+          set -o pipefail
+          python ci_gate.py --eval gate.jsonl --redteam rt.jsonl | tee gate.log
+
+      # ALWAYS uploaded, especially on a failure. A paid run that fails and throws its own
+      # evidence away has to be paid for twice, and this repo has already done that once.
+      - name: Keep the run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-gate-${{ github.run_number }}
+          path: |
+            gate.jsonl
+            rt.jsonl
+            *.log
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### Eval gate — run ${{ github.run_number }}"
+            echo ''
+            echo '```'
+            cat gate.log 2>/dev/null || echo 'the gate did not get as far as deciding'
+            echo '```'
+            echo ''
+            echo "Index cache: \`${{ steps.index-cache.outputs.cache-hit == 'true' && 'hit — no rebuild' || 'miss — rebuilt, about Rs 9' }}\`"
+            echo ''
+            echo "The full run output is attached as an artifact for 30 days."
+          } >> "$GITHUB_STEP_SUMMARY"
