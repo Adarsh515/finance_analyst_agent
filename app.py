@@ -22,6 +22,7 @@
 import json
 import os
 import secrets
+import threading
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -459,11 +460,92 @@ def get_trace(message_id: int, user=Depends(current_user), conn=Depends(get_db))
     return trace
 
 
+# --- admission to the paid path -------------------------------------------------------------------
+#
+# WHAT WAS MEASURED, and it is worse than the defect that was predicted. probe_concurrency.py
+# lowered the limit to leave a budget of FOUR paid questions and then sent fourteen requests at
+# the same instant. Fourteen were answered. **Zero were refused.** All fourteen were charged.
+#
+# The reason is not subtle once it is written down. The old guard read the count, then the
+# agent ran, and only THEN was the row that records the charge written. Every request that
+# arrived inside that gap read a count that did not yet include any of the others - so they
+# all saw the same number and they all passed. The gap is not a scheduling accident measured
+# in microseconds: it is the whole agent call, roughly eight seconds in production. A limit
+# that is CHECKED and then ACTED ON, with the evidence of the act written last, is not a
+# limit. It is a suggestion with good intentions.
+#
+# THE FIX IS TO MAKE THE CLAIM ITSELF THE FIRST WRITE. A request reserves its slot under a
+# lock, before any model call, and the reservation is visible to every other request from that
+# instant. The count that admission compares against is therefore
+#
+#     paid answers already RECORDED   +   paid answers currently IN FLIGHT
+#
+# and the second term is the one the old code could not see. The lock is held only for the
+# arithmetic - never across the agent call - so this serialises admission, not answering.
+#
+# WHAT THIS IS NOT: process-wide, and that limitation is real rather than hidden. Two uvicorn
+# workers would keep two separate counters and the bound would be per-worker. That is exactly
+# the constraint the Dockerfile already pins with `--workers 1`, for the SQLite reason, so the
+# validity of this defence and the shape of the deployment are the same shape. If this ever
+# runs multi-process the reservation has to move into the database, and the honest place to
+# discover that is here rather than in production.
+#
+# AND THE SPEND BOUND STAYS APPROXIMATE, deliberately. A request's cost is not known until it
+# finishes, so there is nothing truthful to reserve; MAX_USD_PER_WINDOW is still compared
+# against what has been recorded. The COUNT bound is now exact and the SPEND bound is a
+# trailing one, and saying so is better than implying both were fixed.
+
+_ASK_INFLIGHT_LOCK = threading.Lock()
+_ASK_INFLIGHT = {}          # user_id -> paid asks admitted but not yet recorded
+
+
+def ask_slot(user=Depends(current_user), conn=Depends(get_db)):
+    """Admit one paid ask, or refuse it. Releases the slot however the request ends.
+
+    A dependency with `yield` rather than a block inside the endpoint, because the release
+    MUST happen on every exit - a 500 from the agent, a guard that raises, a client that
+    disconnects. A `finally` that lives in the same function as two hundred lines of answering
+    is a `finally` somebody eventually returns past; FastAPI runs this teardown for us.
+    """
+    uid = user["id"]
+    with _ASK_INFLIGHT_LOCK:
+        used = db.recent_asks(conn, uid, ASK_WINDOW_MINUTES)
+        pending = _ASK_INFLIGHT.get(uid, 0)
+        if used["paid"] + pending >= MAX_PAID_ASKS_PER_WINDOW:
+            # THE WORDING IS PRECISE ON PURPOSE, and the first draft of it was wrong. A cache
+            # hit does not COUNT towards the limit, but once the limit is reached it is not
+            # EXEMPT from it either - this guard sits ahead of the cache lookup, because the
+            # lookup needs the rewriter to have run and the rewriter is itself a paid call.
+            # Saying "cached repeats are free" here would have been a false statement printed
+            # at the exact moment a user is trying to understand why they were refused.
+            raise HTTPException(429, f"Rate limit reached: {MAX_PAID_ASKS_PER_WINDOW} paid "
+                                     f"questions per {ASK_WINDOW_MINUTES} minutes. Answers "
+                                     f"served from the cache are not counted towards it, but "
+                                     f"no further requests are accepted until the window "
+                                     f"clears.")
+        if used["usd"] >= MAX_USD_PER_WINDOW:
+            raise HTTPException(429, f"Spend limit reached: ${MAX_USD_PER_WINDOW:.2f} per "
+                                     f"{ASK_WINDOW_MINUTES} minutes. Try again shortly.")
+        _ASK_INFLIGHT[uid] = pending + 1
+    try:
+        yield
+    finally:
+        with _ASK_INFLIGHT_LOCK:
+            remaining = _ASK_INFLIGHT.get(uid, 1) - 1
+            if remaining > 0:
+                _ASK_INFLIGHT[uid] = remaining
+            else:
+                # POPPED, not set to zero. A dict that keeps a 0 for every account that has
+                # ever asked a question is a slow leak whose only symptom is memory, and this
+                # process is meant to stay up.
+                _ASK_INFLIGHT.pop(uid, None)
+
+
 # --- the one that matters ---------------------------------------------------------------------------
 
 @app.post("/ask")
 def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(get_db),
-        _=Depends(csrf_guard)):
+        _=Depends(csrf_guard), _slot=Depends(ask_slot)):
     """Answer one question, store it, and store how it was answered.
 
     A plain `def`, not `async def`, and that is load-bearing. agent.run_agent blocks for
@@ -476,24 +558,9 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
     if not question:
         raise HTTPException(400, "Question is empty.")
 
-    # THE ORDER MATTERS HERE TOO. The limit is checked before ANY write and before any model
-    # call - a refused request must not leave a user turn stranded in a conversation with no
-    # answer under it, and must not create an empty conversation as a side effect.
-    used = db.recent_asks(conn, user["id"], ASK_WINDOW_MINUTES)
-    if used["paid"] >= MAX_PAID_ASKS_PER_WINDOW:
-        # THE WORDING IS PRECISE ON PURPOSE, and the first draft of it was wrong. A cache hit
-        # does not COUNT towards the limit, but once the limit is reached it is not EXEMPT
-        # from it either - this guard sits ahead of the cache lookup, because the lookup
-        # needs the rewriter to have run and the rewriter is itself a paid call. Saying
-        # "cached repeats are free" here would have been a false statement printed at the
-        # exact moment a user is trying to understand why they were refused.
-        raise HTTPException(429, f"Rate limit reached: {MAX_PAID_ASKS_PER_WINDOW} paid questions "
-                                 f"per {ASK_WINDOW_MINUTES} minutes. Answers served from the "
-                                 f"cache are not counted towards it, but no further requests "
-                                 f"are accepted until the window clears.")
-    if used["usd"] >= MAX_USD_PER_WINDOW:
-        raise HTTPException(429, f"Spend limit reached: ${MAX_USD_PER_WINDOW:.2f} per "
-                                 f"{ASK_WINDOW_MINUTES} minutes. Try again shortly.")
+    # The rate limit is no longer checked here. It is ADMISSION, and it happens in the
+    # ask_slot dependency above, before this function is entered. See that function for the
+    # measurement that moved it.
 
     if body.conversation_id is None:
         title = question[:60] + ("…" if len(question) > 60 else "")

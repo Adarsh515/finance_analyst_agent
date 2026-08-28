@@ -47,6 +47,7 @@ CHECKS = [
     ("rewriter.py",              False, "bounds, cleaner, future-period rule"),
     ("test_app.py",              False, "33 route checks against a stubbed agent"),
     ("test_server.py",           False, "6 checks against a real uvicorn thread pool"),
+    ("probe_concurrency.py",     False, "12 simultaneous writes; the rate limit under a burst"),
     ("probe_telemetry_equiv.py", False, "the eval and the API record cost identically"),
     ("judges_scope.py",          True,  "figures/methodology rules; a year is not a figure"),
     ("judges_coverage.py",       True,  "the set-coverage scoring rule, no model called"),
@@ -62,7 +63,8 @@ CHECKS = [
 # not. A file's cost and a file's dependencies are two different questions, and this list has
 # already been wrong once about the first one.
 
-SUBPROCESS_HEAVY = {"test_mcp_server.py", "probe_mcp_equivalence.py", "test_server.py"}
+SUBPROCESS_HEAVY = {"test_mcp_server.py", "probe_mcp_equivalence.py",
+                    "test_server.py", "probe_concurrency.py"}
 
 # The `script` field may include arguments; needs_index is checked against the file name.
 
