@@ -6,6 +6,14 @@ on every figure, **refuses when the filings do not contain the answer**, resists
 injection planted inside the documents — and, the part this project is actually about,
 **measures all of that and publishes what the measurements got wrong**.
 
+![The trace panel under one answer: which pipeline steps ran, which filings were read, and
+every retrieval candidate with its raw distance and whether it was kept.](docs/trace-panel.png)
+
+*Every answer opens up. The pipeline strip shows which steps ran and which were skipped; the
+planner's searches are listed with the candidates each one returned, the raw Chroma distances,
+and which were kept — bars rescaled within one job only, because a distance means nothing on
+its own.*
+
 | Latest gate — 102 questions | result |
 |---|---|
 | correctness | **102 / 102** |
@@ -316,6 +324,12 @@ any answer (*"How this answer was produced"*) to see:
 - **Model calls, tokens and cost** — per call, then a stored total. On a cache hit there is also
   an *"Avoided by the cache"* row, and that figure is what this exact question cost the first
   time it was asked — a recorded historical cost, not an estimate.
+
+![The cost panel on a cached answer: You paid $0.000000, and Avoided by the cache $0.000508.](docs/cost-panel.png)
+
+*The same question asked twice. The second time costs nothing — and the panel still shows what
+the first one cost, because "avoided" is a figure recorded when the answer was first produced,
+not an estimate of what a model would charge today.*
 
 `DEMO_SCRIPT.md` contains seven ready-made question chains with expected answers, including a
 cache demo and a prompt-injection demo.
