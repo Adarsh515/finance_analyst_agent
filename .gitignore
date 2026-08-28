@@ -20,3 +20,6 @@ scope_methodology.jsonl
 _mcp_server_stderr_foreign.log
 mcp_diag.py
 mcp_diag_report.txt
+
+.env.*
+*.bak

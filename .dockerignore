@@ -1,0 +1,49 @@
+# What must NOT reach the build context, and the first group is the only one that matters.
+#
+# A .dockerignore is usually treated as an image-size optimisation. It is also a SECURITY
+# boundary, and a stricter one than .gitignore: everything in the build context is sent to the
+# daemon, and anything COPYed in survives in a layer even if a later step deletes it. `.env` is
+# gitignored, so nothing stops a `COPY . .` from baking this project's API key into a
+# distributable image - the one file most carefully kept out of git, shipped inside the
+# artefact git was protecting.
+.env
+.env.*
+*.key
+*.pem
+keys.txt
+
+# Build artefacts and measurement OUTPUT. The project's rule is commit inputs and code, never
+# outputs; the same rule applies here, and the eval runs alone are several megabytes.
+.venv/
+__pycache__/
+*.pyc
+chroma_db/
+app.db
+app.db-wal
+app.db-shm
+eval_*.jsonl
+eval_*.txt
+red_team*.jsonl
+rewrite_*.jsonl
+rt_*.jsonl
+coverage_regression.jsonl
+scope_methodology.jsonl
+_mcp_server_stderr.log
+_mcp_server_stderr_foreign.log
+_to_delete/
+
+# Throwaway diagnostics.
+mcp_diag.py
+mcp_diag_report.txt
+_commitmsg*.txt
+
+# History and CI config are not needed to RUN the thing.
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# chroma_db is excluded above and that is deliberate, not an oversight: the index is BUILT by
+# paid embedding calls and is mounted at runtime, never baked in. An image carrying the index
+# would have to be rebuilt every time a filing is added, and it would ship 2,686 chunks of
+# someone else's cost to anyone who pulls it.

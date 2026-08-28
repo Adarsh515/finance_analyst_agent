@@ -1,0 +1,110 @@
+# .github/workflows/docker.yml
+#
+# WHY THIS EXISTS EVEN THOUGH THE IMAGE ALSO BUILDS ON A LAPTOP. A build that succeeded once,
+# on one machine, on one day, is the same kind of evidence as an MCP server tested only from
+# its own folder - it proves the thing worked where it was born. Lesson 168, 2026-08-28. The
+# Dockerfile's entire claim is "this runs somewhere that is not the author's machine", so the
+# only place that claim can be checked is somewhere that is not the author's machine.
+#
+# WHAT THIS PROVES, and it is deliberately less than it looks:
+#
+#   PROVED   the image builds from a clean checkout on a machine that has never seen it
+#   PROVED   the container starts, and /health answers on a PUBLISHED port - which is the
+#            exact thing app.py's `host="127.0.0.1"` default would break, and the reason
+#            the Dockerfile invokes uvicorn directly instead of running `python app.py`
+#   PROVED   the app imports end to end with no index present and no real API key
+#
+#   NOT PROVED   that a mounted index works. chroma_db/ is gitignored, is built by PAID
+#                embedding calls, and is not in this checkout - so the container here serves
+#                ZERO filings, on purpose, and the assertion below says so out loud rather
+#                than quietly skipping it. Whether the volume mount is right is checked by
+#                the image's own HEALTHCHECK, on a machine that has the index.
+#
+# COSTS NOTHING. No model is called: with a dummy key and no index, the app imports and
+# serves, which was measured on a clean Ubuntu runner on 2026-08-26 (14 passed, 0 failed,
+# zero network calls).
+
+name: docker
+
+on:
+  push:
+    paths: ['Dockerfile', '.dockerignore', 'requirements.txt', '.github/workflows/docker.yml']
+  pull_request:
+    paths: ['Dockerfile', '.dockerignore', 'requirements.txt', '.github/workflows/docker.yml']
+  workflow_dispatch:
+
+# A paths filter, not every push. This build takes minutes because langchain, chromadb and
+# onnxruntime are large, and a check that runs when nothing it covers has changed trains
+# people to ignore it.
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t finance-agent:ci .
+
+      # THE SECRET THAT IS NOT A SECRET, and the point is that it cannot become one. judges.py
+      # builds its model object at import time, so the app will not import without SOMETHING in
+      # GOOGLE_API_KEY. A real key is not needed because nothing here calls a model - and the
+      # repository has no GOOGLE_API_KEY secret configured on purpose, because the learner's key
+      # is not being rotated until the project is approved.
+      - name: Start the container
+        run: |
+          docker run -d --name fa \
+            -e GOOGLE_API_KEY=ci-dummy-key-no-network-calls-are-made \
+            -p 8000:8000 finance-agent:ci
+
+      - name: /health must answer on the published port
+        run: |
+          set -o pipefail
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health -o health.json; then
+              echo "answered after ${i}s"; break
+            fi
+            sleep 1
+          done
+          test -s health.json || { echo "no reply from /health"; exit 1; }
+          cat health.json
+          python3 - <<'PY'
+          import json, sys
+          h = json.load(open("health.json"))
+          assert h.get("status") == "ok", h
+          # ZERO IS THE EXPECTED ANSWER HERE and asserting it is not pedantry: if this ever
+          # returns a non-zero count, an index has got into the image, which means .dockerignore
+          # stopped excluding chroma_db and the image is now shipping paid embeddings.
+          assert h.get("filings") == 0, (
+              f"the image contains an index ({h['filings']} filings) - .dockerignore is not "
+              f"excluding chroma_db/, and a built index must never be baked into the image")
+          print("container is up, bound to 0.0.0.0, and carries no index")
+          PY
+
+      # `set -o pipefail` is above for the reason measured on 2026-08-26: GitHub's default
+      # shell is `bash -e` WITHOUT pipefail, so a failing command piped into anything else
+      # hands its exit code to the last stage of the pipe and the step goes green over a
+      # broken tree.
+
+      - name: The image must not contain a key or a database
+        run: |
+          if docker run --rm --entrypoint sh finance-agent:ci -c 'ls -a /app' | grep -qx '.env'; then
+            echo "FAIL: .env was copied into the image"; exit 1
+          fi
+          if docker run --rm --entrypoint sh finance-agent:ci -c 'ls -a /app' | grep -qx 'app.db'; then
+            echo "FAIL: app.db was copied into the image"; exit 1
+          fi
+          echo "no .env and no app.db in the image"
+
+      # A control aimed at the one mistake .dockerignore exists to prevent. It is checked on
+      # the BUILT IMAGE rather than by reading .dockerignore, because a file that lists the
+      # right patterns and a file that is actually being applied are two different claims -
+      # and only the second one is worth anything.
+
+      - name: Container log
+        if: always()
+        run: docker logs fa || true
+
+      - name: Stop
+        if: always()
+        run: docker rm -f fa || true
