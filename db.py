@@ -35,7 +35,8 @@ DB_PATH = os.environ.get("APP_DB", "app.db")
 # v3  2026-08-18  Phase 6.5  answer_cache (exact-match, fingerprint in the key)
 # v4  2026-08-18  Phase 6.6  traces.retrieval_json + answer_cache.retrieval_json
 # v5  2026-08-19  Phase 6.7  traces.saved_* (what the first run cost) + answer_cache.is_refusal
-SCHEMA_VERSION = 5
+# v6  2026-08-29  Phase 7    traces.run_version (which configuration produced this answer)
+SCHEMA_VERSION = 6
 
 
 def utcnow():
@@ -257,6 +258,20 @@ MIGRATIONS = {
     ALTER TABLE traces ADD COLUMN saved_input_tokens INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE traces ADD COLUMN saved_output_tokens INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE answer_cache ADD COLUMN is_refusal INTEGER NOT NULL DEFAULT 0;
+    """,
+    # Phase 7. WHICH CONFIGURATION PRODUCED THIS ANSWER. Everything else on a trace row
+    # describes the RUN - cost, chunks, guard, rounds - and none of it identifies the system
+    # that did the running. That is fine while nothing changes and useless the moment
+    # something does, which is exactly when a trace is wanted: after a prompt edit, when the
+    # question is "did this answer come from the old wording or the new one?" and today there
+    # is no way to tell. See version.py.
+    #
+    # NULLABLE, and rows written before this migration keep NULL rather than being
+    # backfilled with the current version. Backfilling would be a lie with a hash on it -
+    # asserting that old answers came from today's configuration, which is the one thing
+    # this column exists to disprove. A NULL says "not recorded", and that is true.
+    6: """
+    ALTER TABLE traces ADD COLUMN run_version TEXT;
     """,
 }
 
@@ -484,7 +499,8 @@ def save_trace(conn, *, message_id, conversation_id, user_id, question_raw,
                question_rewritten=None, jobs=None, filings=None, chunk_ids=None,
                rounds=None, reflect_fired=False, guard_fired="", cache_hit=False,
                calls=(), seconds=None, retrieval=None,
-               saved_usd=0.0, saved_input_tokens=0, saved_output_tokens=0):
+               saved_usd=0.0, saved_input_tokens=0, saved_output_tokens=0,
+               run_version=None):
     """Write one answered question's full provenance, header and per-call rows, atomically.
 
     `calls` is the list of (label, input_tokens, output_tokens, model, usd) tuples captured
@@ -503,8 +519,8 @@ def save_trace(conn, *, message_id, conversation_id, user_id, question_raw,
         " question_rewritten, jobs_json, filings_json, chunk_ids_json, rounds, "
         " reflect_fired, guard_fired, cache_hit, input_tokens, output_tokens, usd, "
         " seconds, created_at, retrieval_json, "
-        " saved_usd, saved_input_tokens, saved_output_tokens) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " saved_usd, saved_input_tokens, saved_output_tokens, run_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (message_id, conversation_id, user_id, question_raw, question_rewritten,
          json.dumps(jobs) if jobs is not None else None,
          json.dumps(filings) if filings is not None else None,
@@ -516,7 +532,8 @@ def save_trace(conn, *, message_id, conversation_id, user_id, question_raw,
          # What the first run cost. Only ever non-zero on a cache hit, and the caller reads it
          # off the cached row rather than estimating it - a "saving" the product invented
          # would be marketing, not measurement.
-         float(saved_usd), int(saved_input_tokens), int(saved_output_tokens)))
+         float(saved_usd), int(saved_input_tokens), int(saved_output_tokens),
+         run_version))
     trace_id = cur.lastrowid
     conn.executemany(
         "INSERT INTO trace_calls (trace_id, seq, label, model, input_tokens, output_tokens, usd) "
@@ -708,7 +725,8 @@ if __name__ == "__main__":
                      rounds=1, reflect_fired=False,
                      guard_fired="quarantine:['999999'] -> regenerated from trusted chunks only",
                      calls=calls, seconds=8.4,
-                     retrieval=[{"query": "revenue", "candidates": []}])
+                     retrieval=[{"query": "revenue", "candidates": []}],
+                     run_version="abc123def456")
     t = get_trace(c, m_bot)
     # the header totals are SUMs of the call rows, computed in one place, so they cannot drift
     assert t["input_tokens"] == 900 + 3736 + 3100
@@ -720,6 +738,29 @@ if __name__ == "__main__":
     # a paid run records no saving - "avoided by the cache" must be zero unless a cache hit
     # actually avoided something
     assert t["saved_usd"] == 0.0 and t["saved_input_tokens"] == 0
+    # v6: which configuration answered. Read back through get_trace rather than with a raw
+    # SELECT, because the column existing and the READER returning it are two claims, and the
+    # trace panel only ever sees the second one.
+    assert t["run_version"] == "abc123def456", (
+        f"run_version did not survive save_trace -> get_trace: {t.get('run_version')!r}")
+    ok += 1
+
+    # AND IT MUST BE ALLOWED TO BE NULL. Rows written before v6 are not backfilled - a
+    # backfill would assert that old answers came from today's configuration, which is the one
+    # thing this column exists to disprove. NULL means "not recorded", which is true.
+    #
+    # ON ITS OWN DATABASE, and the first version of this check was not. Written against `c` it
+    # added a third answered question and broke the spend assertion sixty lines below, which
+    # counts them - a control that damages the check after it is not a control, it is a second
+    # defect wearing an assertion. A check needs its own state or it is testing the order the
+    # file happens to be written in.
+    _n = init_db(connect(":memory:"))
+    _u = create_user(_n, "null-version@example.com")
+    _cv = create_conversation(_n, _u, "v6 null check")
+    _m = add_message(_n, _cv, "assistant", "An answer from before v6.")
+    save_trace(_n, message_id=_m, conversation_id=_cv, user_id=_u, question_raw="old")
+    assert get_trace(_n, _m)["run_version"] is None, "an unrecorded version was invented"
+    _n.close()
     ok += 1
 
     # ...and a cache hit records BOTH numbers: what the reader paid, and what the first run of

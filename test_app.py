@@ -93,6 +93,35 @@ def main():
     assert "langsmith_tracing" in h and "cookie_secure" in h
     ok += 1
 
+    # --- /health names WHICH configuration is running, component by component ---------------
+    # Phase 7. The digest alone would only ever say "something moved"; the components are what
+    # make two disagreeing deployments comparable without diffing source trees by hand.
+    run = h["run"]
+    assert run["run_version"] == appmod.CACHE_FINGERPRINT, (run, appmod.CACHE_FINGERPRINT)
+    for part in ("answer_prompt", "plan_prompt", "reflect_prompt", "rewrite_prompt",
+                 "model", "bounds", "index"):
+        assert part in run and len(run[part]) == 12, (part, run.get(part))
+    ok += 1
+
+    # THE CONTROL THAT MATTERS, and it is pointed at the defect this replaced rather than at
+    # the happy path. The OLD fingerprint was a digest of the filings alone, so editing the
+    # answer prompt left it unmoved and every cached answer from the old wording went on being
+    # served. Recompute the version with one character changed in the answer prompt: the
+    # digest must move, and ONLY the answer_prompt component may move with it.
+    import version as _v
+    _args = dict(answer_prompt=appmod.rag.PROMPT, plan_prompt=appmod.agent.PLAN_PROMPT,
+                 reflect_prompt=appmod.agent.REFLECT_PROMPT,
+                 rewrite_prompt=appmod.rewriter.REWRITE_PROMPT,
+                 model="m", temperature=0, bounds={"MAX_JOBS": 6},
+                 filings=appmod.agent.FILINGS, chunk_count=appmod.agent.CHUNK_COUNT)
+    _before = _v.components(**_args)
+    _after = _v.components(**dict(_args, answer_prompt=appmod.rag.PROMPT + " "))
+    assert _v.run_version(_before) != _v.run_version(_after), \
+        "editing the answer prompt did not move the run version - stale answers would be served"
+    assert [k for k in _before if _before[k] != _after[k]] == ["answer_prompt"], \
+        "an answer-prompt edit moved a component that has nothing to do with it"
+    ok += 1
+
     # /filings reads the real Chroma index, which is a gitignored build artefact. On a
     # machine that has not run build_index.py it is legitimately empty - so the shape is
     # asserted when there is anything to assert, and the SKIP is printed loudly rather than

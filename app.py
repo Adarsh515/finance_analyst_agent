@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 import auth
 import cache
 import db
+import version
 
 load_dotenv()
 
@@ -90,10 +91,46 @@ assert agent.GUARDS is True, "refusing to serve with agent.GUARDS = False"
 # away from the failure lesson 96 records - a harness whose default contradicted the shipped
 # configuration for weeks without anyone noticing.
 #
-# The fingerprint is computed once, at import, from what the index actually holds, and it is
-# part of the cache KEY. A rebuilt corpus therefore cannot reach an old entry at all - the
-# rows become unreachable rather than merely stale.
-CACHE_FINGERPRINT = cache.index_fingerprint(agent.FILINGS)
+# The fingerprint is computed once, at import, and it is part of the cache KEY. A changed
+# system therefore cannot reach an old entry at all - the rows become unreachable rather than
+# merely stale.
+#
+# IT USED TO BE THE INDEX ALONE, and that was too narrow in a way nothing would ever have
+# reported. `cache.index_fingerprint(agent.FILINGS)` digests the (company, period) pairs and
+# nothing else, so editing the answer prompt, changing the model, or changing MAX_ROUNDS left
+# it exactly where it was - and every cached answer from the old configuration went on being
+# served, silently, because nothing downstream of a cache disagrees with it. Worse, the
+# machinery for the narrowest case was already written and never wired: index_fingerprint
+# takes a `chunk_count` and this line never passed one, so re-chunking the SAME six filings
+# produced the SAME fingerprint. Phase 7, version.py.
+#
+# The COMPONENTS are kept alongside the digest, not thrown away, so /health can say WHICH part
+# moved. "The version changed" sends someone diffing two deployments by hand; "the answer
+# prompt moved and the index did not" is an answer.
+RUN_COMPONENTS = version.components(
+    # The template ACTUALLY SELECTED, which folds in GUARD_PROMPT and SHOW_ARITHMETIC without
+    # hashing either separately - and correctly leaves HARDENED_PROMPT out of the digest while
+    # it ships disabled, so editing an unused prompt cannot invalidate a single cached answer.
+    answer_prompt=agent._with_arithmetic_rule(
+        agent.guards.HARDENED_PROMPT if agent.GUARD_PROMPT else rag.PROMPT),
+    plan_prompt=agent.PLAN_PROMPT,
+    reflect_prompt=agent.REFLECT_PROMPT,
+    rewrite_prompt=rewriter.REWRITE_PROMPT,
+    # Read off the bound model object, not typed again here - see
+    # agent.model_identity() for why a second copy of this fact is a defect.
+    model=agent.model_identity()[0],
+    temperature=agent.model_identity()[1],
+    # Every bound that shapes retrieval. These live in code and never in a prompt (the Phase
+    # 4.1 rule), which is also what makes them hashable at all.
+    bounds={"MAX_JOBS": agent.MAX_JOBS, "MAX_ROUNDS": agent.MAX_ROUNDS,
+            "K_PER_JOB": agent.K_PER_JOB, "PER_JOB_FLOOR": agent.PER_JOB_FLOOR,
+            "MIN_CHUNKS": agent.MIN_CHUNKS, "FOLLOWUP_PER_JOB": agent.FOLLOWUP_PER_JOB,
+            "MAX_REFLECT_JOBS": agent.MAX_REFLECT_JOBS, "GUARDS": agent.GUARDS,
+            "SEARCH_ATTEMPTS": agent.SEARCH_ATTEMPTS},
+    filings=agent.FILINGS,
+    chunk_count=agent.CHUNK_COUNT,
+)
+CACHE_FINGERPRINT = version.run_version(RUN_COMPONENTS)
 CACHE_ENABLED = os.environ.get("CACHE_OFF", "").lower() not in ("1", "true", "yes")
 
 
@@ -258,6 +295,10 @@ def health():
             "max_paid_asks_per_window": MAX_PAID_ASKS_PER_WINDOW,
             "max_usd_per_window": MAX_USD_PER_WINDOW,
             "cache_enabled": CACHE_ENABLED, "cache_fingerprint": CACHE_FINGERPRINT,
+            # The components, not just the digest. Two deployments that disagree can
+            # be compared line by line without anyone diffing source trees by hand,
+            # which is the only reason a version number is worth printing at all.
+            "run": version.describe(RUN_COMPONENTS),
             "guards": agent.GUARDS, "guard_prompt": agent.GUARD_PROMPT,
             "schema_version": db.SCHEMA_VERSION, "cookie_secure": COOKIE_SECURE,
             # Reported because it can be off for a reason nobody remembers. On 2026-08-18 the
@@ -604,6 +645,10 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
         message_id = db.add_message(conn, conversation_id, "assistant", hit["answer"])
         db.save_trace(
             conn, message_id=message_id, conversation_id=conversation_id, user_id=user["id"],
+        # WHICH SYSTEM ANSWERED. Recorded per row rather than looked up later, because
+        # "later" is after the configuration has already changed - which is the only
+        # time anybody asks.
+        run_version=CACHE_FINGERPRINT,
             question_raw=question, question_rewritten=rewritten,
             jobs=json.loads(hit["jobs_json"]) if hit["jobs_json"] else None,
             filings=json.loads(hit["filings_json"]) if hit["filings_json"] else None,
@@ -644,6 +689,10 @@ def ask(body: AskIn, request: Request, user=Depends(current_user), conn=Depends(
 
     db.save_trace(
         conn, message_id=message_id, conversation_id=conversation_id, user_id=user["id"],
+        # WHICH SYSTEM ANSWERED. Recorded per row rather than looked up later, because
+        # "later" is after the configuration has already changed - which is the only
+        # time anybody asks.
+        run_version=CACHE_FINGERPRINT,
         question_raw=question,
         question_rewritten=rewritten,
         # jobs_log, NOT jobs. `jobs` is a work queue that retrieve_node drains, so by the

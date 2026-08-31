@@ -124,16 +124,40 @@ GUARD_PROMPT     = False # OFF, and this default is a measurement, not a prefere
 BASE_LLM = getattr(llm, "bound", llm)
 
 
+def model_identity():
+    """(model id, temperature) of the model actually bound, read rather than restated.
+
+    The literal "gemini-3.1-flash-lite" appears in this file four times, in log_cost calls,
+    and typing it a fifth time to build a version digest would create a fact that can disagree
+    with the object doing the work - a version claiming a model the system is not running.
+    Read from BASE_LLM instead, the same way FILINGS is read from the index.
+    """
+    model = (getattr(BASE_LLM, "model", None)
+             or getattr(BASE_LLM, "model_name", None) or "unknown")
+    return model, getattr(BASE_LLM, "temperature", None)
+
+
 # --- What is actually in the index ------------------------------------------
 # Read once at import. This is a plain Chroma read: no embeddings, no API cost.
 
+def _index_snapshot():
+    """ONE read of the index, returning both facts taken from it.
+
+    Two facts, one read, because they must describe the SAME index. Two separate calls could
+    straddle a rebuild and produce a filing list and a chunk count that never coexisted - and
+    the pair is hashed into the run version (version.py), so a mismatched pair would be a
+    version identifying a system that never ran.
+    """
+    metas = vectorstore.get(include=["metadatas"])["metadatas"]
+    return sorted({(m["company"], m["period"]) for m in metas}), len(metas)
+
+
 def _index_filings():
     """Return the (company, period) pairs present in the index, sorted."""
-    metas = vectorstore.get(include=["metadatas"])["metadatas"]
-    return sorted({(m["company"], m["period"]) for m in metas})
+    return _index_snapshot()[0]
 
 
-FILINGS = _index_filings()                       # e.g. [("AMD", "fiscal year 2025 ..."), ...]
+FILINGS, CHUNK_COUNT = _index_snapshot()         # e.g. [("AMD", "fiscal year 2025 ..."), ...]
 KNOWN_PAIRS = set(FILINGS)                       # for validating what the planner returns
 CORPUS_LINES = "\n".join(f"- {c} | {p}" for c, p in FILINGS)
 

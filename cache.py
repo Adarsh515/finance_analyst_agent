@@ -87,7 +87,16 @@ def key_for(question, fingerprint):
 
 
 def index_fingerprint(filings, chunk_count=None):
-    """A short digest of what the index currently holds."""
+    """A short digest of what the index currently holds.
+
+    NO LONGER THE CACHE FINGERPRINT ON ITS OWN, as of Phase 7. app.py used to call this with
+    one argument and use the result as the whole cache key prefix - which meant the key moved
+    when the corpus changed and stayed put when the PROMPT, the MODEL or the retrieval bounds
+    changed, so a prompt edit left every old answer reachable forever. `chunk_count` was
+    already here and was never passed, so re-chunking the same filings did not move it either.
+    The index is now ONE COMPONENT of version.run_version(); this function still computes that
+    component, and is kept because it is the right digest for the question it actually asks.
+    """
     blob = json.dumps([sorted(map(list, filings)), chunk_count], ensure_ascii=False)
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 

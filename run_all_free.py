@@ -35,6 +35,7 @@ import time
 # (script, needs_index, note). needs_index=True means it degrades to a SKIP without a built
 # index rather than failing - a fresh clone should still be able to run this.
 CHECKS = [
+    ("version.py",               False, "the run digest: deterministic, and every input moves it"),
     ("db.py",                    False, "schema, migrations, cascade, spend"),
     ("cache.py",                 False, "keys, refusals, fingerprint, purge"),
     ("telemetry.py",             False, "capture, pricing, thread isolation"),
@@ -45,7 +46,7 @@ CHECKS = [
     ("rewrite_set.py",           False, "25 items, ids unique across all three sets"),
     ("tesla_set.py",             False, "8 items, evidence supports every figure"),
     ("rewriter.py",              False, "bounds, cleaner, future-period rule"),
-    ("test_app.py",              False, "33 route checks against a stubbed agent"),
+    ("test_app.py",              False, "35 route checks against a stubbed agent"),
     ("test_server.py",           False, "6 checks against a real uvicorn thread pool"),
     ("probe_concurrency.py",     False, "12 simultaneous writes; the rate limit under a burst"),
     ("probe_telemetry_equiv.py", False, "the eval and the API record cost identically"),
