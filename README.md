@@ -175,7 +175,7 @@ method's honesty: this README ends with a list of things the measurements proved
    guards.py ........ context fence, quarantine + regenerate-from-trusted,
                       n-gram leak detection, token provenance, doc-reference scrub
                                      |
-   db.py ............ SQLite (WAL, schema v5): accounts, sessions, conversations,
+   db.py ............ SQLite (WAL, schema v6): accounts, sessions, conversations,
                       per-answer trace and per-call cost
                                      |
                         answer + trace panel in the browser
@@ -227,7 +227,7 @@ change moved an early score from 58% to 96%.
 | Chunking | `RecursiveCharacterTextSplitter`, 1000 / 150 | Narrative only — tables are kept whole and titled by `parse_filing.py`. |
 | Filing parsing | **BeautifulSoup4** + **lxml** + **html5lib** | SEC HTML is not well-formed; the table extractor needs a forgiving parser. |
 | API | **FastAPI** 0.141.1 + **Uvicorn** | Endpoints are `def`, not `async def`, on purpose: an 8-second blocking answer on the event loop would freeze every other request. |
-| Database | **SQLite** (stdlib), WAL, schema v5 | Forward-only migrations, CHECK constraints for impossible states, session tokens stored as SHA-256. |
+| Database | **SQLite** (stdlib), WAL, schema v6 | Forward-only migrations, CHECK constraints for impossible states, session tokens stored as SHA-256. |
 | Passwords | **argon2id** (`argon2-cffi`) | Parameters anchored to RFC 9106's second recommended option; memory raised 64 → 128 MiB because memory is what makes a GPU cracking farm expensive, while time costs defender and attacker alike. |
 | Front end | Vanilla HTML/CSS/JS (`ui.html`) | No framework. All model output is escaped by hand, everywhere — rendering an answer as HTML would give a prompt injection a second, easier target. |
 | Export | **python-docx**, **reportlab** | Conversation download — questions and answers only, deliberately without the engineering trace. |
@@ -414,6 +414,29 @@ Every run stores the full context **and the judges' raw observations**, so re-sc
 run under a changed rule costs nothing. That is not a convenience; it is the reason an entire
 judge recalibration below cost ₹0.
 
+### And where the money actually goes
+
+Four paid calls sit behind one answer — plan, generation, an occasional requarantine retry, an
+occasional reflect round — plus the rewriter in front of them. Until Phase 7 they were only ever
+*added together*, so "an answer costs about ₹0.05" was the most precise thing anyone could say.
+`cost_report.py` splits them, in SQL, over rows that were written once:
+
+```
+  agent-generation      62.8%
+  agent-plan            24.5%
+  agent-rewrite          7.4%
+  agent-reflect          5.4%
+```
+
+**A quarter of every rupee goes to planning.** The obvious optimisation target was always the
+generation call — it is the one that carries the whole context — and the planner turns out to be
+a bigger share than anyone would have guessed. That is the kind of thing a cost total cannot tell
+you, and it is the reason the breakdown exists.
+
+The same report labels the cache column **avoided**, not *saved*, and the distinction is not
+pedantic: the figure is `traces.saved_usd`, what the first run of that repeated question actually
+cost, stored at the time. A saving the product estimated for itself would be marketing.
+
 ---
 
 ## Guardrails
@@ -462,7 +485,7 @@ labels.
 ## What went wrong, and how it was found
 
 This is the part worth reading. The project tracker (`PROJECT_TRACKER.md`, not in this repo)
-carries **165 numbered lessons**. A few that shaped the system:
+carries **176 numbered lessons**. A few that shaped the system:
 
 **A data bug that looked like three separate model failures.** `parse_filing.table_title()`
 titled AMD's acquisition note *"AMD Consolidated Balance Sheets"*, because "Total assets
@@ -536,6 +559,32 @@ against every import in the tree, and `pywin32` carries a platform marker so a n
 install does not fail on it. **Everything a reader touches before your code runs is code you
 have not tested.**
 
+**A rate limit that refused nobody.** `/ask` had carried a written bound since Phase 7 — 40 paid
+questions per account per hour — and it was checked correctly: read the count, refuse if it is at
+the limit, and do it before any write so a refusal cannot strand a user turn. Then
+`probe_concurrency.py` sent fourteen requests at the same instant against a budget of four.
+**Fourteen were answered. Zero were refused. All fourteen were charged.** The guard read the
+count, the agent ran for eight seconds, and only *then* was the row recording the charge written
+— so every request inside that window read a count that did not include the others. Fixed by
+making the claim itself the first write: a request reserves its slot under a lock before any
+model call, and admission compares against *recorded + in flight*. Re-measured: exactly four
+admitted, exactly ten refused. **A limit that is checked and then acted on is not a limit, and
+the hole is exactly as wide as the work it guards.**
+
+What let it survive is worth as much as the defect. The guard carried a careful comment beginning
+*"THE ORDER MATTERS HERE TOO"* — which reasoned correctly about a **different** ordering. A
+comment that visibly thinks hard about one ordering makes every other ordering in the same block
+look considered.
+
+**An MCP server that had never met a real client.** The server exists so that *other people's*
+tools can query the filing index — question one of its own docstring. Every test spawned it with
+`cwd` set to the project folder, the one place it could not fail. Started from anywhere else it
+came up, answered the protocol handshake perfectly, and reported **0 filings** — because `rag.py`
+resolves `.env` and `chroma_db` against the working directory. No crash, no error, no log line:
+every question for the rest of that session was answered "nothing found", which reads as a fact
+about the *filings* rather than a fact about the server. **A test that only ever runs in the
+perfect environment is not weak evidence of portability; it is none.**
+
 ---
 
 ## Deliberately not built
@@ -589,6 +638,23 @@ Written down rather than discovered later, in the bill or in a review.
   one.
 - **Signup leaks account existence; login does not.** Signup must say "that email is taken".
   The login path — the one an attacker actually scripts — is measured indistinguishable.
+- **The cache does not survive a stampede, and this was measured rather than assumed.** Eight
+  *identical* questions arriving at the same instant produced eight misses and eight paid calls,
+  against an ideal of one. Nothing is broken: the cache is filled by whichever request finishes
+  first, and none of these had finished when the others looked. The claim the cache makes is that
+  a **repeated** question is free — repetition over *time* — and that still holds; that
+  simultaneous duplicates cost once is a claim nobody made. Single-flight would fix it and buy a
+  new failure mode, where one stuck leader parks every follower behind it. What settled the
+  decision is that admission now counts in-flight requests, so the number of paid calls that can
+  be in the air at once is bounded by the account's remaining budget — **the blast radius is
+  bounded even though the stampede is not prevented.** It is written down here *because* it was
+  not fixed.
+- **The `/ask` reservation is per process.** Two uvicorn workers would keep two counters and the
+  bound would be per-worker. That is exactly the constraint the Dockerfile already pins with
+  `--workers 1` for the SQLite reason, so the defence's validity and the deployment's shape are
+  the same shape. And the **spend** bound stays trailing rather than exact: a request's cost is
+  unknown until it finishes, so there is nothing truthful to reserve. The *count* bound is exact;
+  saying both were fixed would be false.
 
 ---
 
@@ -602,9 +668,11 @@ rag.py                  the Phase 2 baseline path — never modified since (Cont
 agent.py                the LangGraph path: plan / retrieve / answer / reflect
 rewriter.py             follow-up -> standalone question (a function, not a node)
 guards.py               fence, quarantine + regenerate, leak detection, provenance
-cache.py                exact-match cache; index fingerprint inside the key
+cache.py                exact-match cache; the run version is inside the key
+version.py              one digest over prompts, model, bounds and index — what "the same
+                        system" means, and what invalidates a cached answer
 telemetry.py            one definition of per-call cost, shared by the API and the eval
-db.py / reset_db.py     SQLite schema v5, forward-only migrations
+db.py / reset_db.py     SQLite schema v6, forward-only migrations
 auth.py                 argon2id, rate limiting, measured anti-enumeration
 app.py / ui.html        FastAPI + the browser client
 filing_search_server.py MCP server — evidence only, never an answer
@@ -620,10 +688,15 @@ judges.py               correctness + binary groundedness, and the price table
 judges_scope.py         scope-aware groundedness
 judges_coverage.py      set coverage — its own axis, never ANDed
 run_eval.py             the harness: --agent, --set, --ids, --workers, --out
-run_all_free.py         every free check, one command
+ci_gate.py              the one place that decides what blocks a merge
+run_all_free.py         every free check, one command — 22 of them, ~90s, ₹0
+cost_report.py          where the money went: per call, per configuration, per day
+probe_concurrency.py    simultaneous load: writes, the rate limit, the cache
 probe_*.py              the diagnostic trail — kept on purpose, because they are the
                         "how I found it" half of every finding above
 
+Dockerfile              run the API anywhere; key, index and database all stay outside
+.github/workflows/      free checks on every push; the paid gate only on a human's yes
 DEMO_SCRIPT.md          seven question chains with verified expected answers
 MCP_SETUP.md            wiring the MCP server into Claude Desktop
 data/                   the six filings — inputs, and committed
@@ -637,11 +710,17 @@ outputs.*
 
 ## Roadmap
 
-- **Phase 7 — Deploy & LLMOps.** Docker image and a reproducible index build. A **CI eval gate**
-  that blocks a merge if the regression set drops below 100% *or* the red team drops below 100% —
-  the capability set is reported and never gated, because it is supposed to be below 100%. Prompt
-  and index versioning, so any score can be traced to the exact configuration that produced it.
-  A per-run cost dashboard.
+- **Phase 7 — Deploy & LLMOps. ✅ Shipped.** A **Dockerfile** carrying neither the API key nor
+  the index nor the database, with a health check that asserts the *index* rather than the
+  process — because a container with a missing mount starts perfectly, answers `"status": "ok"`,
+  and returns "Not stated in the filing" to everything. A **CI eval gate** (`ci_gate.py`) that
+  blocks a merge if the regression set drops below 100% *or* the red team drops below 100% — the
+  capability set is reported and never gated, because it is supposed to be below 100%. Three
+  GitHub Actions workflows: free checks on every push, the paid gate only on a human's explicit
+  `yes`, and a Docker build. **Prompt and index versioning** (`version.py`, schema v6), so every
+  answer records the exact configuration that produced it. A **per-run cost dashboard**
+  (`cost_report.py`). And a **concurrency probe**, which found that the `/ask` rate limit did not
+  hold under load at all — see *What went wrong*.
 - **Phase 8 — Voice interface (optional).** Placed last on purpose: it adds nothing to evals,
   guardrails or context optimization, and is the first thing to cut. It does carry one real
   engineering problem — ASR mangles spoken financial figures, and this project's entire payload is
