@@ -54,6 +54,7 @@ CHECKS = [
     ("judges_coverage.py",       True,  "the set-coverage scoring rule, no model called"),
     ("probe_arith.py --selftest", False, "arithmetic self-consistency: extractor + checker"),
     ("ci_gate.py --selftest",    False, "the merge gate, both directions, no files read"),
+    ("cost_report.py --selftest", False, "cost rollups: known numbers in, known totals out"),
     ("test_mcp_server.py",       True,  "11 checks over real stdio JSON-RPC  [NEAR-FREE]"),
     ("probe_mcp_equivalence.py", True,  "MCP vs in-process, byte-identical    [NEAR-FREE]"),
 ]
